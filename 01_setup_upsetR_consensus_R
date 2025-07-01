@@ -1,0 +1,105 @@
+# Load libraries
+... library(DESeq2)
+... library(tidyverse)
+... library(eulerr)
+... library(GenomicRanges)
+... library(VennDiagram)
+... library(pheatmap)
+... library(akima)
+... library(ggrepel)
+... library(UpSetR)
+... library(RColorBrewer)
+... 
+... # Quick inspect function
+... w <- function(a){
+...   print(head(a))
+...   print(nrow(a))
+... }
+... 
+... # Create directory if missing
+... create_dir <- function(dir_path) {
+...   if (!dir.exists(dir_path)) dir.create(dir_path, recursive = TRUE)
+... }
+... 
+... # Plot theme
+... theme <- theme_classic() +
+...   theme(
+...     text = element_text(color = "black"),
+...     plot.title = element_text(hjust = 0.5, size=rel(1.5)),
+...     axis.text.x = element_text(size=rel(1.25)), 
+...     axis.text.y = element_text(size=rel(1.25), angle=90, hjust=0.5),
+...     axis.title.y = element_text(size=rel(1.5))
+...   )
+... 
+... # Date tag
+... current_date <- toupper(format(Sys.Date(), "%d%b%y"))
+... 
+... # Color palettes
+tol_palette <- c("#DDDDDD", "#2E2585", "#327538", "#5DA899", "#95CBEC", "#DCCD7D", "#C26A77", "#9F4A96", "#7E2954")
+red_blue_base_palette <- c("#0F65AB", "#3993C3", "#8EC4DE", "#D1E5F0", "#F9F9F9", "#F6A482", "#D75F4C", "#B31429")
+
+# Directories – Update as needed
+main_wd <- "/Users/brandiatteberry/Desktop/ATACseq_Nextflow/"; create_dir(main_wd)
+macs_wd <- paste0(main_wd, "macs/"); create_dir(macs_wd)
+deseq_wd <- paste0(main_wd, "R/"); create_dir(deseq_wd)
+scale_wd <- paste0(main_wd, "scale/"); create_dir(scale_wd)
+output_wd <- paste0(deseq_wd, current_date); create_dir(output_wd)
+homer_wd <- paste0(deseq_wd, "Homer/"); create_dir(homer_wd)
+
+# File locations
+boolean_file <- "/Users/brandiatteberry/Desktop/consensus_peaks.mRp.clN.boolean.txt"
+sample_map <- "/Users/brandiatteberry/Desktop/deseq_input_all.csv"
+
+# Load sample renaming info
+sample_renaming <- read.csv(sample_map, check.names=FALSE)
+consensus_samples_a <- sample_renaming %>%
+  filter(Comp_A == "Untreated") %>%
+  distinct(analysis_name_simple, .keep_all = TRUE)
+consensus_samples_b <- consensus_samples_a[, c("sample", "analysis_name_simple")]
+consensus_samples <- consensus_samples_b$analysis_name_simple
+consensus_peak_overlap_samples <- 3
+
+# Load boolean data
+main_df <- read.table(boolean_file, header=TRUE, sep="\t", as.is=TRUE)
+bool_data <- main_df %>% select(ends_with(".bool"))
+colnames(bool_data) <- gsub("\\.mRp\\.clN\\.bool$", "", colnames(bool_data))
+bool_data <- bool_data %>%
+  rename_with(~ consensus_samples_b$analysis_name_simple[match(.x, consensus_samples_b$sample)])
+bool_data <- if(length(consensus_samples) == 0) {bool_data} else {bool_data %>% select(any_of(consensus_samples))}
+filtered_data <- bool_data %>% mutate(across(everything(), as.integer)) %>% filter(rowSums(.) >= 1)
+
+# UpSetR plot
+png(paste0(output_wd, "/upsetR_plot_", current_date, ".png"), width=1800, height=1000, res=120)
+upset(
+  data = filtered_data, sets = names(filtered_data), order.by = "freq",
+  main.bar.color = "grey", matrix.color = "#7E2945",
+  text.scale = 1.25, keep.order = TRUE, mb.ratio = c(0.75, 0.25)
+)
+dev.off()
+
+# Overlap bar chart
+upset_overlaps <- NULL
+for(i in 2:ncol(bool_data)){
+  peak_number_overlaps <- bool_data %>%
+    mutate(across(everything(), as.integer)) %>%
+    filter(rowSums(.) >= i)
+  rows_overlaps <- cbind("Overlaps"=i, "Peaks"=nrow(peak_number_overlaps))
+  upset_overlaps <- rbind(upset_overlaps, rows_overlaps)
+}
+upset_overlap_plot <- ggplot(upset_overlaps, aes(x = Overlaps, y = Peaks)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  geom_text(aes(label = Peaks), vjust = -0.5, color = "black", size=5) +
+  labs(title = "Peaks vs. Overlaps", x = "Number of Overlaps", y = "Number of Peaks") +
+  theme
+ggsave(paste0(output_wd, "/upset_overlap_per_sample_", current_date, ".png"),
+       plot = upset_overlap_plot, width = 6, height = 8, dpi = 500)
+
+# Consensus BED output
+consensus_peaks_a <- data.frame(main_df[, 1:6], bool_data)
+consensus_peaks_b <- consensus_peaks_a %>%
+  filter(num_samples >= consensus_peak_overlap_samples)
+consensus_peaks <- data.frame(consensus_peaks_b[,1:4], "Height"=1, "Strand"="+")
+write.table(consensus_peaks,
+            paste0(output_wd, "/consensus_peaks_", consensus_peak_overlap_samples, "samples_", current_date, ".bed"),
+            col.names = FALSE, row.names = FALSE, quote = FALSE, sep = "\t")
+
