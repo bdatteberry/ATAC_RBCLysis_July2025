@@ -1,0 +1,147 @@
+### Combined Script: Boolean Filtering + Normalization
+### Outputs to both project folder and Desktop, with dynamic date-based folders.
+### Applies ≥2 donor rule (fallback to any overlaps), and writes all versions.
+
+# ────────────────────────────────────────────────
+# Load Libraries
+# ────────────────────────────────────────────────
+library(tidyverse)
+
+# ────────────────────────────────────────────────
+# Set Paths (auto date folders)
+# ────────────────────────────────────────────────
+current_date <- toupper(format(Sys.Date(), "%d%b%y"))
+
+main_wd <- "/Users/brandiatteberry/Documents/ATACseq_July_2025"
+macs_wd <- file.path(main_wd, "macs")
+scale_wd <- file.path(main_wd, "scale")
+
+# Primary output folder (inside project)
+output_wd <- file.path(main_wd, current_date)
+dir.create(output_wd, showWarnings=FALSE)
+
+# Secondary output folder (on Desktop)
+desktop_wd <- file.path("/Users/brandiatteberry/Desktop/ATACseq_Nextflow/R", current_date)
+dir.create(desktop_wd, recursive=TRUE, showWarnings=FALSE)
+
+# Boolean table
+boolean_file <- "/Users/brandiatteberry/Desktop/consensus_peaks.mRp.clN.boolean.txt"
+
+# Auto-detect split count files
+first_six_file <- file.path(macs_wd, "consensus_peaks_first_six_columns.txt")
+bam_counts_file <- file.path(macs_wd, "consensus_peaks_sorted_bam_columns.txt")
+if (!file.exists(first_six_file)) {
+  first_six_file <- file.path(scale_wd, "consensus_peaks_first_six_columns.txt")
+}
+if (!file.exists(bam_counts_file)) {
+  bam_counts_file <- file.path(scale_wd, "consensus_peaks_sorted_bam_columns.txt")
+}
+if (!file.exists(first_six_file) || !file.exists(bam_counts_file)) {
+  stop("Required files not found in either macs or scale folders. Check paths.")
+}
+
+num_overlaps <- 2  # donors per peak threshold
+
+# Helper: write outputs to both destinations
+write_dual <- function(df, filename) {
+  write.table(df, file=file.path(output_wd, filename),
+              sep="\t", quote=FALSE, row.names=FALSE)
+  write.table(df, file=file.path(desktop_wd, filename),
+              sep="\t", quote=FALSE, row.names=FALSE)
+}
+
+# ────────────────────────────────────────────────
+# Load Data
+# ────────────────────────────────────────────────
+message("Loading data...")
+boolean_df <- read.table(boolean_file, header=TRUE, sep="\t", check.names=FALSE)
+data_a <- read.table(first_six_file, header=TRUE)  # Geneid, Chr, Start, End, Strand, Length
+data_b <- read.table(bam_counts_file, header=TRUE, check.names=FALSE)
+rownames(data_b) <- data_a$Geneid
+
+# ────────────────────────────────────────────────
+# Normalize Counts (scale to max library size)
+# ────────────────────────────────────────────────
+sample_totals <- colSums(data_b)
+scale_factors <- round(sample_totals / max(sample_totals), 5)
+scaled_counts <- map_dfc(names(scale_factors), function(s) {
+  round(100 * data_b[[s]] * scale_factors[s])
+})
+colnames(scaled_counts) <- names(scale_factors)
+
+data_b_df <- data.frame(
+  Interval=data_a$Geneid, Chr=data_a$Chr, Start=data_a$Start, End=data_a$End,
+  scaled_counts, check.names=FALSE
+)
+message("Rows in data_b_df: ", nrow(data_b_df))
+
+# ────────────────────────────────────────────────
+# Boolean Overlap Filtering (≥2 donors with fallback)
+# ────────────────────────────────────────────────
+message("Running overlap filtering...")
+bool_treated_data <- boolean_df %>%
+  select(1:6, ends_with(".bool")) %>%
+  mutate(interval_id = paste(chr, start, end, sep=":"))
+
+# Identify all unique base timepoints (strip donor IDs)
+all_bool_cols <- grep("\\.bool$", colnames(boolean_df), value=TRUE)
+base_timepoints <- unique(gsub("^\\d+_", "", gsub("\\.mRp\\.clN\\.bool$", "", all_bool_cols)))
+
+bool_treated_overlaps <- NULL
+for (tp in base_timepoints) {
+  tp_cols <- grep(tp, colnames(bool_treated_data), value=TRUE)
+  if (length(tp_cols) == 0) next
+
+  tp_df <- bool_treated_data %>%
+    select(1:6, all_of(tp_cols)) %>%
+    mutate(Overlaps=rowSums(across(all_of(tp_cols)) == TRUE))
+
+  if (any(tp_df$Overlaps >= num_overlaps)) {
+    tp_df <- tp_df %>% filter(Overlaps >= num_overlaps) %>% mutate(FilterFlag="PASS_2of3")
+  } else {
+    tp_df <- tp_df %>% filter(Overlaps > 0) %>% mutate(FilterFlag="FALLBACK_ANY")
+  }
+
+  bool_treated_overlaps <- bind_rows(bool_treated_overlaps,
+                                     tp_df %>% select(interval_id, FilterFlag))
+}
+
+# Merge filtered intervals with normalized counts
+filtered_ids <- unique(bool_treated_overlaps$interval_id)
+filtered_treated_intervals <- bool_treated_data %>%
+  filter(interval_id %in% filtered_ids) %>%
+  mutate(Chr=chr, Start=start, End=end, Interval=interval_id) %>%
+  left_join(bool_treated_overlaps, by="interval_id") %>%
+  select(-interval_id)
+
+message("Filtered intervals: ", nrow(filtered_treated_intervals))
+print(table(filtered_treated_intervals$FilterFlag))
+
+# ────────────────────────────────────────────────
+# Combine with normalized counts
+# ────────────────────────────────────────────────
+if (nrow(filtered_treated_intervals) > 0) {
+  normalized_counts <- inner_join(
+    data_b_df, filtered_treated_intervals,
+    by=c("Chr","Start","End","Interval")
+  ) %>%
+    select(Chr, Start, End, Interval, all_of(names(scale_factors)), FilterFlag)
+} else {
+  warning("⚠️ No overlaps passed; exporting only normalized counts.")
+  normalized_counts <- data_b_df
+}
+
+# ────────────────────────────────────────────────
+# Write Outputs (to both locations)
+# ────────────────────────────────────────────────
+write_dual(data_b_df, paste0("consensus_peaks_sorted_scale_normalized_counts_", current_date, ".txt"))
+write_dual(normalized_counts, paste0("consensus_peaks_sorted_with_", num_overlaps, "_overlaps_", current_date, ".txt"))
+
+if ("FilterFlag" %in% colnames(normalized_counts)) {
+  pass_2of3 <- normalized_counts %>% filter(FilterFlag=="PASS_2of3")
+  fallback_any <- normalized_counts %>% filter(FilterFlag=="FALLBACK_ANY")
+  write_dual(pass_2of3, paste0("consensus_peaks_PASS_2of3_", current_date, ".txt"))
+  write_dual(fallback_any, paste0("consensus_peaks_FALLBACK_ANY_", current_date, ".txt"))
+}
+
+message("✅ Script complete: Outputs written to ", output_wd, " AND ", desktop_wd)
