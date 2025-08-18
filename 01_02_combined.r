@@ -30,7 +30,7 @@ theme <- theme_classic() + theme(
 # ─────────────────────────────────────────────────────
 # Set Paths
 # ─────────────────────────────────────────────────────
-main_wd <- "/Users/brandiatteberry/Desktop/ATACseq_Nextflow/"; create_dir(main_wd)
+main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Nextflow/"; create_dir(main_wd)
 macs_wd <- file.path(main_wd, "macs"); create_dir(macs_wd)
 deseq_wd <- file.path(main_wd, "R"); create_dir(deseq_wd)
 scale_wd <- file.path(main_wd, "scale"); create_dir(scale_wd)
@@ -38,8 +38,8 @@ output_wd <- file.path(deseq_wd, toupper(format(Sys.Date(), "%d%b%y"))); create_
 homer_wd <- file.path(deseq_wd, "Homer"); create_dir(homer_wd)
 
 current_date <- toupper(format(Sys.Date(), "%d%b%y"))
-boolean_file <- "/Users/brandiatteberry/Desktop/consensus_peaks.mRp.clN.boolean.txt"
-sample_map <- "/Users/brandiatteberry/Desktop/deseq_input_all.csv"
+boolean_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.boolean.txt"
+sample_map <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/deseq_input_all.csv"
 
 # ─────────────────────────────────────────────────────
 # Boolean Filtering + UpSetR Visualization (01_)
@@ -83,7 +83,7 @@ write.table(consensus_peaks, file.path(output_wd, paste0("consensus_peaks_", con
 # ─────────────────────────────────────────────────────
 # featureCounts Processing for Normalization Input
 # ─────────────────────────────────────────────────────
-feature_counts_file <- "/Users/brandiatteberry/Desktop/consensus_peaks.mRp.clN.featureCounts.txt"
+feature_counts_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.featureCounts.txt"
 fc_raw <- read.table(feature_counts_file, header = TRUE, comment.char = "#", check.names = FALSE)
 file_first_six <- file.path(scale_wd, "consensus_peaks_first_six_columns.txt")
 file_bam_columns <- file.path(scale_wd, "consensus_peaks_sorted_bam_columns.txt")
