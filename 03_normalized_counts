@@ -7,15 +7,15 @@ library(tidyverse)
 # ────────────────────────────────────────────────
 # Paths & Settings
 # ────────────────────────────────────────────────
-main_wd <- "/Users/brandiatteberry/Documents/ATACseq_July_2025"
+main_wd <- "/Users/brandiatteberry/Documents/Bioinformatics/ATACseq_July_2025"
 macs_wd <- file.path(main_wd, "macs")
 scale_wd <- file.path(main_wd, "scale")
 
 date_tag <- toupper(format(Sys.Date(), "%d%b%y"))
-output_dir <- file.path("/Users/brandiatteberry/Desktop/ATACseq_Nextflow/R", date_tag)
+output_dir <- file.path("/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Nextflow/R", date_tag)
 dir.create(output_dir, recursive=TRUE, showWarnings=FALSE)
 
-boolean_file <- "/Users/brandiatteberry/Desktop/consensus_peaks.mRp.clN.boolean.txt"
+boolean_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.boolean.txt"
 
 # Detect split count files
 first_six_file <- file.path(macs_wd, "consensus_peaks_first_six_columns.txt")
