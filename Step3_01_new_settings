@@ -1,0 +1,188 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+#                            01_Settings.r  (YOUR PATHS)
+# =============================================================================
+# - Uses your ATACseq_Analysis project + RBC_Lysis_Bioinformatics_training files
+# - Saves outputs under: /Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis/R/<DATE>
+# - Robust QC ID detection and DESeq input fallback
+# =============================================================================
+
+suppressPackageStartupMessages({ library(tidyverse) })
+
+# ---- Project roots -----------------------------------------------------------
+main_wd      <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+script_dir   <- file.path(main_wd, "scripts")
+current_date <- "25JUL25"  # or: toupper(format(Sys.Date(), "%d%b%y"))
+
+# Source helpers created earlier
+source(file.path(script_dir, "Function_list.r"))
+source(file.path(script_dir, "Directory_creation.r"))   # defines output_wd, seq_stats_wd, deseq_wd, etc.
+
+# =============================================================================
+#                       Download files from nextflow (notes)
+# =============================================================================
+# Put nextflow outputs into:
+#   - macs_wd : merged_library/macs2/narrow_peak/consensus/
+#   - scale_wd: merged_library/bigwig/scale/
+
+{
+# ---- Input Files (YOUR absolute paths) ---------------------------------------
+input_data_df         <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/individual_seq_stats_output.csv"
+deseq_input_file      <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/deseq_input_merged_samples.csv" # may be missing
+deseq_input_reps_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
+sample_rename_file    <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/sample_rename.csv"
+
+# ---- Thresholds & Options ----------------------------------------------------
+thresholds         <- "Y"     # run QC?
+num_overlaps_ratio <- 0.65
+sample_rename      <- "N"
+timepoint_merge    <- "Y"     # if timecourse
+
+main_threshold_list <- list(
+  peak_threshold = 5000,   # min MACS2 peaks
+  read_threshold = 10      # min reads (M)
+)
+flagged_threshold_list <- list(
+  frip_threshold      = 1.5,  # %
+  chrM_threshold      = 30,   # %
+  duplicate_threshold = 50    # %
+)
+
+# ---- Plot/DESeq knobs --------------------------------------------------------
+deseq_comparison_option <- "Comp_A"
+pca_variance_numbers    <- 5
+deseq_padj_cutoff       <- 4
+deseq_log2fc_cutoff     <- 2
+volcano_plot_zoom       <- c(5, 40)
+
+sig_windows        <- 0.01
+pval_thresh_quant  <- 0.01
+baseMean_threshold <- 10
+top_windows        <- 2000
+black_white_heatmap <- "N"
+
+# ---- Color Options -----------------------------------------------------------
+tol_palette <- c("#DDDDDD", "#2E2585", "#327538", "#5DA899", "#95CBEC", "#DCCD7D", "#C26A77", "#9F4A96", "#7E2954")
+red_blue_base_palette <- c("#0F65AB", "#3993C3", "#8EC4DE", "#D1E5F0", "#F9F9F9", "#0F65AB", "#F6A482", "#D75F4C", "#B31429")
+heatmap_colors <- colorRampPalette(c("#0F65AB", "#F9F9F9", "#B31429"))(100)
+heatmap_breaks <- seq(-4, 4, length.out = length(heatmap_colors) + 1)
+
+if (black_white_heatmap == "Y") {
+  mid2mid <- colorRampPalette(c("black", "gray80"))(50)
+  neg2pos <- colorRampPalette(c("gray80", "white"))(51)
+  heatmap_colors_bw <- c(mid2mid, neg2pos)
+  heatmap_breaks_bw <- seq(-4, 4, length.out = length(heatmap_colors_bw) + 1)
+}
+
+# =============================================================================
+#                               SAMPLE QC
+# =============================================================================
+choose_first_present <- function(nms, candidates) {
+  cand <- candidates[candidates %in% nms]
+  if (length(cand) == 0) return(NA_character_) else cand[1]
+}
+
+if (thresholds == "Y") {
+  if (!file.exists(input_data_df)) {
+    warning("QC file not found at: ", input_data_df, " — skipping QC.")
+    sample_remove   <- NULL
+    flagged_samples <- NULL
+  } else {
+    seq_stats_import <- read.csv(input_data_df, header = TRUE, check.names = FALSE)
+
+    # Safe ifelse that returns 0 if the column isn’t present
+    sf <- function(col, cmp, thr) {
+      if (!col %in% names(seq_stats_import)) return(0L)
+      as.integer(ifelse(cmp(seq_stats_import[[col]], thr), 1L, 0L))
+    }
+
+    seq_stats_import <- seq_stats_import %>%
+      mutate(
+        mapped_reads_M_fail = sf("mapped_reads_M", `<`,  main_threshold_list$read_threshold),
+        peaks_fail          = sf("peaks",          `<`,  main_threshold_list$peak_threshold),
+        FRiP_fail           = sf("FRiP",           `<`,  flagged_threshold_list$frip_threshold),
+        chrM_perc_fail      = sf("chrM_perc",      `>`,  flagged_threshold_list$chrM_threshold),
+        dup_perc_fail       = sf("dup_perc",       `>`,  flagged_threshold_list$duplicate_threshold),
+        total_score         = mapped_reads_M_fail + peaks_fail + FRiP_fail + chrM_perc_fail + dup_perc_fail,
+        remove_or_flag      = case_when(
+          mapped_reads_M_fail == 1 | peaks_fail == 1 ~ "Remove",
+          FRiP_fail == 1 | chrM_perc_fail == 1 | dup_perc_fail == 1 ~ "Flag",
+          TRUE ~ "Pass"
+        )
+      )
+
+    # Pick an existing ID column
+    id_col <- choose_first_present(
+      names(seq_stats_import),
+      c("nextflow_replicate_ID","nextflow_sample_ID","replicate_id","sample","Sample","sample_id","library","library_id")
+    )
+    if (is.na(id_col)) {
+      id_col <- "row_index"
+      seq_stats_import$row_index <- seq_len(nrow(seq_stats_import))
+      message("⚠️ No obvious ID column found in QC CSV; using row numbers as IDs.")
+    }
+
+    # Keep only the columns that actually exist
+    keep_cols <- intersect(
+      c(id_col, "mapped_reads_M_fail","peaks_fail","FRiP_fail","chrM_perc_fail","dup_perc_fail","remove_or_flag","total_score"),
+      names(seq_stats_import)
+    )
+    threshold_qc_df <- seq_stats_import %>% select(all_of(keep_cols))
+
+    sample_remove   <- threshold_qc_df %>% filter(remove_or_flag == "Remove") %>% select(all_of(id_col))
+    flagged_samples <- threshold_qc_df %>% filter(remove_or_flag == "Flag")   %>% select(all_of(id_col))
+
+    write.csv(threshold_qc_df, file.path(output_wd, "threshold_qc_df.csv"), row.names = FALSE)
+    message("✅ Wrote QC summary: ", file.path(output_wd, "threshold_qc_df.csv"))
+  }
+} else {
+  sample_remove   <- NULL
+  flagged_samples <- NULL
+}
+
+# =============================================================================
+#                        DESeq OPTIONS / CONDITIONS
+# =============================================================================
+# Use merged file if present; otherwise fall back to coldata_for_DESeq2.csv
+use_merged <- file.exists(deseq_input_file)
+if (use_merged) {
+  deseq_options      <- read.csv(deseq_input_file, header = TRUE, check.names = FALSE)
+  deseq_options_reps <- read.csv(deseq_input_reps_file, header = TRUE, check.names = FALSE)
+} else {
+  message("⚠️ DESeq merged-samples CSV not found at:\n   ", deseq_input_file,
+          "\n   → Falling back to individual-samples CSV: ", deseq_input_reps_file)
+  if (!file.exists(deseq_input_reps_file)) stop("Neither DESeq CSV exists. Check paths.")
+  deseq_options      <- read.csv(deseq_input_reps_file, header = TRUE, check.names = FALSE)
+  deseq_options_reps <- deseq_options
+}
+
+# Ensure comparison column exists
+if (!deseq_comparison_option %in% names(deseq_options)) {
+  alts <- c("Comp_A","Comp_B","condition","Condition","group","Group")
+  hit  <- alts[alts %in% names(deseq_options)]
+  if (length(hit) == 0) stop("No comparison column found (looked for: ", paste(c(deseq_comparison_option, alts), collapse=", "), ").")
+  message("⚠️ Column '", deseq_comparison_option, "' not found; using '", hit[1], "'.")
+  deseq_comparison_option <- hit[1]
+}
+
+conditions      <- unique(deseq_options[[deseq_comparison_option]])
+bool_timepoints <- if ("sample" %in% names(deseq_options)) deseq_options$sample else NA_character_
+donor_col       <- choose_first_present(names(deseq_options), c("Donor_number","Donor","donor","donor_id"))
+total_donors    <- if (is.na(donor_col)) NA_integer_ else length(unique(deseq_options[[donor_col]]))
+
+pca_normalization        <- "vst"
+deseq_padj_cutoff_nonlog <- 10^(-deseq_padj_cutoff)
+
+# ---- Files used by downstream scripts ----------------------------------------
+filtered_counts_unsorted_file <- paste0("all_consensus_peaks_nonsorted_with_overlap_filter_replicate_samples_", current_date, ".txt")
+filtered_counts_file          <- paste0("all_consensus_peaks_sorted_with_overlap_filter_replicate_samples_",  current_date, ".txt")
+consensus_peaks_file          <- "consensus_peaks.mRp.clN.annotatePeaks.txt"
+
+# ---- Colors for Comp_A -------------------------------------------------------
+comp_a_colors <- c(
+  "untreated" = tol_palette[1], "HSA" = tol_palette[2], "DMSO" = tol_palette[3],
+  "PMA" = tol_palette[4], "TNFalpha" = tol_palette[5], "fMLP" = tol_palette[6],
+  "C5a" = tol_palette[7], "CI" = tol_palette[8]
+)
+
+} # end block
