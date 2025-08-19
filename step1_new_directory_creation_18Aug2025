@@ -1,11 +1,12 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-#                    Directory_creation.r  (AUTO-PATHS + DYNAMIC DATE)
+#              Directory_creation.r  (AUTO-PATHS + DYNAMIC DATE)
 # =============================================================================
-# - Always uses today's date (America/Los_Angeles) on each run
-# - Writes a dynamic scripts/00_auto_paths.R that re-computes "today" at source time
-# - Creates today's directory tree under main_wd
-# - Saves a paths.Rds snapshot for the current run
+# - Always uses "today" in America/Los_Angeles (unless overridden)
+# - Creates <ATACseq_Analysis>/R/<DATE> and other folders
+# - Writes scripts/00_auto_paths.R that recomputes "today" when sourced
+# - Optionally bootstraps scripts/Function_list.r (placeholder)
+# - Writes paths.Rds snapshot
 #
 # Optional reproducibility override (either one):
 #   options(project.date_override = "YYYY-MM-DD")
@@ -16,36 +17,34 @@ suppressPackageStartupMessages({
   # base R only
 })
 
-# --- Config / Defaults --------------------------------------------------------
+# ---- Config / Default root ---------------------------------------------------
 if (!exists("main_wd")) {
-  # Change this default if needed
-  main_wd <- "/Users/brandiatteberry/Desktop/ATACseq_Nextflow"
+  main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
 }
-# Normalize trailing slashes
-main_wd <- sub("/+$", "", main_wd)
+main_wd <- sub("/+$", "", main_wd)  # normalize trailing slash
 
-# Timezone and date override support
+# ---- Date handling (LA "today" or override) ----------------------------------
 tz <- getOption("project.tz", "America/Los_Angeles")
 override <- getOption("project.date_override", Sys.getenv("PROJECT_DATE", ""))
 
 project_current_date <- function() {
-  if (nzchar(override)) {
-    d <- as.Date(override)
+  d <- if (nzchar(override)) {
+    as.Date(override)
   } else {
-    # Compute "today" in the requested tz using base R only
-    d <- as.Date(format(as.POSIXct(Sys.time(), tz = tz), "%Y-%m-%d"))
+    # compute today in requested tz using base R
+    as.Date(format(as.POSIXct(Sys.time(), tz = tz), "%Y-%m-%d"))
   }
   toupper(format(d, "%d%b%y"))
 }
 current_date <- project_current_date()
 
-# --- Helpers ------------------------------------------------------------------
+# ---- Helpers -----------------------------------------------------------------
 create_dir <- function(path) {
   if (!dir.exists(path)) dir.create(path, recursive = TRUE)
   invisible(path)
 }
 
-# Adds _<DATE> before extension (or at end if no ext)
+# Add _<DATE> before extension (or at end if no ext)
 stamp <- function(path, tag = current_date) {
   dirp <- dirname(path)
   base <- basename(path)
@@ -55,7 +54,7 @@ stamp <- function(path, tag = current_date) {
   file.path(dirp, dated)
 }
 
-# --- Core Working Dirs --------------------------------------------------------
+# ---- Core working dirs -------------------------------------------------------
 macs_wd           <- file.path(main_wd, "macs")
 scale_wd          <- file.path(main_wd, "scale")
 deseq_wd          <- file.path(main_wd, "R")
@@ -66,7 +65,7 @@ rep_overlap_wd    <- file.path(output_wd, "replicate_normalized")
 pre_deseq_reps_wd <- file.path(rep_overlap_wd, "pre_DESeq_counts")
 homer_r_wd        <- file.path(rep_overlap_wd, "HOMER_post_processing")
 
-# --- Script & Snapshot Dirs ---------------------------------------------------
+# ---- Script & Snapshot dirs --------------------------------------------------
 scripts_wd   <- file.path(main_wd, "scripts")
 snapshots_wd <- file.path(scripts_wd, "_snapshots", current_date)
 
@@ -79,7 +78,7 @@ deseq_dds_folder_reps_overlap <- file.path(rep_overlap_wd, "DESeq_dds_output_rep
 file_a <- file.path(scale_wd, "consensus_peaks_first_six_columns.txt")
 file_b <- file.path(scale_wd, "consensus_peaks_sorted_bam_columns.txt")
 
-# --- Make the directories -----------------------------------------------------
+# ---- Make the directories ----------------------------------------------------
 invisible(lapply(list(
   main_wd, macs_wd, scale_wd, deseq_wd, output_wd, homer_wd,
   seq_stats_wd, rep_overlap_wd, pre_deseq_reps_wd, homer_r_wd,
@@ -87,6 +86,7 @@ invisible(lapply(list(
   scripts_wd, snapshots_wd
 ), create_dir))
 
+# ---- Option B: ensure Function_list.r exists (minimal placeholder) -----------
 .ensure_function_list <- function(outfile = file.path(scripts_wd, "Function_list.r")){
   if (!file.exists(outfile)) {
     dir.create(dirname(outfile), recursive = TRUE, showWarnings = FALSE)
@@ -101,9 +101,9 @@ invisible(lapply(list(
       "}",
       ""
     ), outfile)
-    message(\"🛠  Created Function_list.r: \", outfile)
+    message("🛠  Created Function_list.r: ", outfile)
   } else {
-    message(\"ℹ️ Function_list.r already exists: \", outfile)
+    message("ℹ️ Function_list.r already exists: ", outfile)
   }
 }
 .ensure_function_list()
@@ -111,28 +111,23 @@ invisible(lapply(list(
 # Publish default scripts location so future helpers save into scripts/
 options(project.scripts_wd = scripts_wd)
 
-# --- Persist a reusable *dynamic* paths script (+ RDS) ------------------------
+# ---- Write dynamic 00_auto_paths.R -------------------------------------------
 .write_paths_R <- function(outfile = file.path(scripts_wd, "00_auto_paths.R")) {
-  # Write a template that recomputes today's date at *source time*, not bake time
   lines <- c(
     "# --- 00_auto_paths.R (dynamic date; source this in every script) ---------",
     "tz <- getOption('project.tz', 'America/Los_Angeles')",
     "override <- getOption('project.date_override', Sys.getenv('PROJECT_DATE', ''))",
     "",
     "project_current_date <- function(){",
-    "  if (nzchar(override)) {",
-    "    d <- as.Date(override)",
-    "  } else {",
-    "    d <- as.Date(format(as.POSIXct(Sys.time(), tz = tz), '%Y-%m-%d'))",
-    "  }",
+    "  d <- if (nzchar(override)) as.Date(override) else as.Date(format(as.POSIXct(Sys.time(), tz = tz), '%Y-%m-%d'))",
     "  toupper(format(d, '%d%b%y'))",
     "}",
     "current_date <- project_current_date()",
     "",
-    sprintf("main_wd  <- '%s'", main_wd),
-    sprintf("macs_wd  <- '%s'", macs_wd),
-    sprintf("scale_wd <- '%s'", scale_wd),
-    sprintf("deseq_wd <- '%s'", deseq_wd),
+    paste0("main_wd  <- \"", main_wd, "\""),
+    paste0("macs_wd  <- \"", macs_wd, "\""),
+    paste0("scale_wd <- \"", scale_wd, "\""),
+    paste0("deseq_wd <- \"", deseq_wd, "\""),
     "",
     "# Date-derived folders (always 'today' when this file is sourced)",
     "output_wd         <- file.path(deseq_wd, current_date)",
@@ -146,8 +141,8 @@ options(project.scripts_wd = scripts_wd)
     "deseq_dds_folder_reps_overlap <- file.path(rep_overlap_wd, 'DESeq_dds_output_reps_overlap')",
     "scripts_wd   <- file.path(main_wd, 'scripts')",
     "snapshots_wd <- file.path(scripts_wd, '_snapshots', current_date)",
-    sprintf("file_a <- file.path('%s', 'consensus_peaks_first_six_columns.txt')", scale_wd),
-    sprintf("file_b <- file.path('%s', 'consensus_peaks_sorted_bam_columns.txt')",  scale_wd),
+    paste0("file_a <- file.path(\"", scale_wd, "\", \"consensus_peaks_first_six_columns.txt\")"),
+    paste0("file_b <- file.path(\"", scale_wd, "\", \"consensus_peaks_sorted_bam_columns.txt\")"),
     "",
     "# Helpers (idempotent)",
     "create_dir <- function(path){ if(!dir.exists(path)) dir.create(path, recursive = TRUE); invisible(path) }",
@@ -165,8 +160,8 @@ options(project.scripts_wd = scripts_wd)
   message("Wrote auto-paths script (dynamic date): ", outfile)
 }
 
+# ---- Save paths snapshot ------------------------------------------------------
 .save_paths_Rds <- function(outfile = file.path(main_wd, "paths.Rds")) {
-  # Snapshot for this run (today at run-time)
   paths <- list(
     current_date = current_date,
     main_wd = main_wd,
@@ -191,17 +186,16 @@ options(project.scripts_wd = scripts_wd)
   message("Wrote paths RDS:        ", outfile)
 }
 
-# Write canonical files
+# ---- Write canonical files ----------------------------------------------------
 .write_paths_R(file.path(scripts_wd, "00_auto_paths.R"))
 .save_paths_Rds(file.path(main_wd,   "paths.Rds"))
 
-# Optional: keep a dated snapshot copy of the auto_paths file for provenance
+# Optional: keep a dated snapshot copy of 00_auto_paths.R
 snap_auto <- file.path(snapshots_wd, paste0("00_auto_paths_", current_date, ".R"))
 file.copy(file.path(scripts_wd, "00_auto_paths.R"), snap_auto, overwrite = TRUE)
 
-# --- Messages -----------------------------------------------------------------
+# ---- Messages ----------------------------------------------------------------
 message("✅ Directories ready under: ", main_wd, "/")
 message("✅ Output date folder:      ", output_wd)
 message("✅ Scripts folder:          ", scripts_wd)
 message("✅ Snapshots folder:        ", snapshots_wd)
-, snapshots_wd)
