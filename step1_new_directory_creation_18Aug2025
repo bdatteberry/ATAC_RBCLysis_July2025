@@ -87,6 +87,27 @@ invisible(lapply(list(
   scripts_wd, snapshots_wd
 ), create_dir))
 
+.ensure_function_list <- function(outfile = file.path(scripts_wd, "Function_list.r")){
+  if (!file.exists(outfile)) {
+    dir.create(dirname(outfile), recursive = TRUE, showWarnings = FALSE)
+    writeLines(c(
+      "# Function_list.r (auto-created placeholder)",
+      "create_dir <- function(path){ if(!dir.exists(path)) dir.create(path, recursive = TRUE); invisible(path) }",
+      "stamp <- function(path, tag){",
+      "  if (missing(tag)) tag <- if (exists('current_date', inherits = TRUE)) get('current_date', inherits = TRUE) else toupper(format(Sys.Date(), '%d%b%y'))",
+      "  dirp <- dirname(path); base <- basename(path);",
+      "  ext <- tools::file_ext(base); stem <- if (nzchar(ext)) tools::file_path_sans_ext(base) else base;",
+      "  file.path(dirp, if (nzchar(ext)) paste0(stem, '_', tag, '.', ext) else paste0(stem, '_', tag))",
+      "}",
+      ""
+    ), outfile)
+    message(\"🛠  Created Function_list.r: \", outfile)
+  } else {
+    message(\"ℹ️ Function_list.r already exists: \", outfile)
+  }
+}
+.ensure_function_list()
+
 # Publish default scripts location so future helpers save into scripts/
 options(project.scripts_wd = scripts_wd)
 
