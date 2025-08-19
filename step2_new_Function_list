@@ -6,8 +6,8 @@
 
 # ---- Load Libraries ---------------------------------------------------------
 suppressPackageStartupMessages({
-  library(DESeq2)
   library(tidyverse)
+  library(DESeq2)
   library(eulerr)
   library(GenomicRanges)
   library(VennDiagram)
@@ -19,29 +19,35 @@ suppressPackageStartupMessages({
   library(stringr)
   library(viridis)
   library(purrr)
-  library(variancePartition)
   library(reshape2)
   library(umap)
 })
+# variancePartition is optional and not required for the code below:
+if (requireNamespace("variancePartition", quietly = TRUE)) {
+  suppressPackageStartupMessages(library(variancePartition))
+} else {
+  message("ℹ️ Skipping 'variancePartition' (not installed).")
+}
 
 # ---- Bootstrap paths & today's date (LA time) -------------------------------
 # Expect that you've already run Directory_creation.r once today.
 # It writes scripts/00_auto_paths.R which recomputes the date at source-time.
 
-# Fallback default for where your project lives (only used if option not set)
-if (!exists("main_wd")) {
-  main_wd <- "/Users/brandiatteberry/Desktop/ATACseq_Nextflow"
-}
-main_wd   <- sub("/+$", "", main_wd)
+# Project root (fallback if option not set)
+main_wd <- getOption("project.main_wd",
+                     "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis")
+# remove trailing slashes
+main_wd <- sub("/+$", "", main_wd)
 
 # Find scripts folder, prefer the global option set by Directory_creation.r
 scripts_wd <- getOption("project.scripts_wd", file.path(main_wd, "scripts"))
 auto_paths <- file.path(scripts_wd, "00_auto_paths.R")
 if (!file.exists(auto_paths)) {
-  stop("Missing ", auto_paths, 
+  stop("Missing ", auto_paths,
        "\nRun Directory_creation.r first to create today's folders and 00_auto_paths.R.")
 }
 source(auto_paths)  # defines current_date, output_wd, homer_wd, file_a, file_b, etc.
+options(project.scripts_wd = scripts_wd)
 
 # Helper to ensure dirs exist (idempotent)
 create_dir <- function(dir_path) {
@@ -60,22 +66,56 @@ invisible(lapply(list(
 message("✅ Using date tag: ", current_date)
 message("✅ Outputs -> ", output_wd)
 
-# ---- Reference files (YOUR PATHS) -------------------------------------------
-counts_file   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.featureCounts_1.txt"
-homer_annot   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks_annotated_HOMER.txt"
-coldata_file  <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
-peak_bed_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mLb.clN.bed"
-boolean_file  <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.boolean.txt"
+# ---- Reference files (auto-find under project; fallback to training) --------
+training_dir <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training"
 
-# Split featureCounts files (these are also defined in 00_auto_paths.R as file_a / file_b)
+.find_under <- function(root, pattern) {
+  list.files(root, pattern = pattern, recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+}
+.first_existing <- function(...) {
+  cands <- unlist(list(...))
+  ex <- cands[file.exists(cands)]
+  ifelse(length(ex) > 0, ex[1], NA_character_)
+}
+
+# Prefer files from your project; use training_dir only if not found
+counts_file <- .first_existing(
+  .find_under(main_wd, "featureCounts.*\\.txt$"),
+  file.path(training_dir, "consensus_peaks.mRp.clN.featureCounts_1.txt")
+)
+
+homer_annot <- .first_existing(
+  .find_under(main_wd, "consensus_peaks.*annotate.*(HOMER|annotated).*\\.txt$"),
+  file.path(training_dir, "consensus_peaks_annotated_HOMER.txt")
+)
+
+# Prefer merged colData you created in output_wd; fall back to training
+coldata_file <- .first_existing(
+  file.path(output_wd, "deseq_input_merged_samples.csv"),
+  file.path(output_wd, "coldata_for_DESeq2.csv"),
+  file.path(training_dir, "deseq_input_merged_samples.csv"),
+  file.path(training_dir, "coldata_for_DESeq2.csv")
+)
+
+peak_bed_file <- .first_existing(
+  .find_under(main_wd, "\\.mLb\\.clN\\.bed$"),
+  file.path(training_dir, "consensus_peaks.mLb.clN.bed")
+)
+
+boolean_file <- .first_existing(
+  .find_under(main_wd, "\\.boolean\\.txt$"),
+  file.path(training_dir, "consensus_peaks.mRp.clN.boolean.txt")
+)
+
+# Split featureCounts files (also defined in 00_auto_paths.R as file_a / file_b)
 file_first_six   <- file_a
 file_bam_columns <- file_b
 
-# Sanity check key refs (non-fatal for split files which may be produced later)
-must_exist <- c(counts_file, homer_annot, coldata_file, peak_bed_file, boolean_file)
-missing <- must_exist[!file.exists(must_exist)]
-if (length(missing) > 0) {
-  stop("Missing required reference file(s):\n", paste0(" - ", missing, collapse = "\n"))
+# Sanity check key refs (warn, don't hard-stop so you can run pieces)
+.must_exist <- c(counts_file, homer_annot, coldata_file, peak_bed_file, boolean_file)
+.missing <- .must_exist[is.na(.must_exist) | !file.exists(.must_exist)]
+if (length(.missing) > 0) {
+  warning("Missing reference file(s):\n", paste0(" - ", .missing, collapse = "\n"))
 }
 
 # ---- Plot Theme -------------------------------------------------------------
@@ -100,14 +140,19 @@ w <- function(a) { print(head(a)); print(nrow(a)) }
 # Boolean filtering helper (keeps only .bool, strips .mRp.clN.bool)
 boolean_filtering_function <- function(input_df, samples) {
   bool_data <- input_df %>% select(ends_with(".bool"))
+  if (ncol(bool_data) == 0) stop("No *.bool columns found. Make sure boolean/split steps ran.")
   colnames(bool_data) <- colnames(bool_data) %>% str_replace("\\.mRp\\.clN\\.bool$", "")
   bool_data %>% select(any_of(samples))
 }
 
-# UpSetR plot for “untreated”-style groups
+# UpSetR plot for “untreated”-style groups (with empty-guard)
 untreated_upsetR_plot <- function(input_data, plot_name) {
-  input_df_samples <- input_data[, 5:ncol(input_data)]
+  input_df_samples <- input_data[, 5:ncol(input_data), drop = FALSE]
   colnames(input_df_samples) <- str_replace(colnames(input_df_samples), "^X", "")
+  if (ncol(input_df_samples) < 2 || sum(colSums(input_df_samples) > 0) == 0) {
+    message("Skipping UpSetR (not enough non-empty sets) for ", plot_name)
+    return(invisible(NULL))
+  }
   png_filename <- file.path(output_wd, paste0("upsetR_plot_", plot_name, "_", current_date, ".png"))
   png(png_filename, width = 1800, height = 1000, res = 120)
   print(
@@ -126,13 +171,18 @@ untreated_upsetR_plot <- function(input_data, plot_name) {
 }
 
 # Build consensus peaks + UpSet plot (writes BED)
-consensus_peaks_function <- function(main_df, samples, condition, consensus_peak_overlap_samples = 3) {
-  bool_data     <- boolean_filtering_function(main_df, samples)
-  filtered_data <- bool_data %>% mutate(across(everything(), as.integer))
-  filtered_data_b <- data.frame(main_df[, 1:4], filtered_data)
+# NOTE: default overlap threshold is *2* (less stringent). Increase as needed.
+consensus_peaks_function <- function(main_df, samples, condition,
+                                     consensus_peak_overlap_samples = 2) {
+  bool_data       <- boolean_filtering_function(main_df, samples)
+  filtered_data   <- bool_data %>% mutate(across(everything(), ~ as.integer(.x)))
+  filtered_data_b <- data.frame(main_df[, 1:4, drop = FALSE], filtered_data)
   filtered_data_c <- filtered_data_b %>% filter(rowSums(select(., -(1:4))) >= consensus_peak_overlap_samples)
-  filtered_data_c$num_samples <- rowSums(filtered_data_c[, -(1:4)])
-  consensus_peaks <- data.frame(filtered_data_c[, 1:4], Height = 1, Strand = "+")
+  if (nrow(filtered_data_c) == 0) {
+    message("No peaks pass the overlap threshold=", consensus_peak_overlap_samples, ". Try a smaller value.")
+  }
+  filtered_data_c$num_samples <- rowSums(filtered_data_c[, -(1:4), drop = FALSE])
+  consensus_peaks <- data.frame(filtered_data_c[, 1:4, drop = FALSE], Height = 1, Strand = "+")
   outname <- file.path(output_wd, paste0("consensus_peaks_", condition, "_",
                                          consensus_peak_overlap_samples, "samples_", current_date, ".bed"))
   write.table(consensus_peaks, outname, col.names = FALSE, row.names = FALSE, quote = FALSE, sep = "\t")
@@ -143,6 +193,10 @@ consensus_peaks_function <- function(main_df, samples, condition, consensus_peak
 # Overlap ladder plot (2..n)
 untreated_overlap_consensus <- function(input_df, samples, condition) {
   bool_data <- boolean_filtering_function(input_df, samples) %>% mutate(across(everything(), as.integer))
+  if (ncol(bool_data) < 2) {
+    message("Need at least 2 samples for overlap ladder plot (", condition, ")")
+    return(invisible(NULL))
+  }
   upset_overlaps <- map_df(2:ncol(bool_data), function(i) {
     tibble(Overlaps = i, Peaks = nrow(bool_data %>% filter(rowSums(.) >= i)))
   })
@@ -159,11 +213,10 @@ untreated_overlap_consensus <- function(input_df, samples, condition) {
 #                             Functions from Script 02
 # =============================================================================
 
-# Recreate split files if missing (uses an external shell script)
+# Recreate split files if missing (uses helper shell script in scripts/)
 check_and_source_script <- function() {
   if (!file.exists(file_a) || !file.exists(file_b)) {
-    script_dir   <- dirname(file_a) # adjust if needed
-    script_path  <- file.path(script_dir, "awk_consensusPeak_filtering_mergedsamples.sh")
+    script_path <- file.path(scripts_wd, "awk_consensusPeak_filtering_mergedsamples.sh")
     if (file.exists(script_path)) {
       system(paste("sh", shQuote(script_path)))
     } else {
@@ -234,87 +287,67 @@ calculate_rowmean_by_category <- function(df, category_pattern) {
 }
 
 # =============================================================================
-#                             Functions from Script 05
-# =============================================================================
-
-# PCA plot generator
-generate_pca_plot <- function(pc_data, x_component, y_component,
-                              color_by = "condition", shape_by = "condition",
-                              custom_colors = NULL, custom_shapes = NULL,
-                              title = "PCA plot", aes_label = "donor",
-                              point_size = 10, label_size = 4) {
-  p <- ggplot(pc_data, aes_string(x = x_component, y = y_component, color = color_by, shape = shape_by)) +
-    geom_point(size = point_size) +
-    labs(x = x_component, y = y_component, title = title) +
-    geom_text_repel(aes_string(label = aes_label), segment.size = 0.2, force = 5, box.padding = 0.75, size = label_size)
-  if (!is.null(custom_colors)) p <- p + scale_color_manual(values = custom_colors)
-  if (!is.null(custom_shapes)) p <- p + scale_shape_manual(values = custom_shapes)
-  p + my_ggplot_theme
-}
-
-# Save a ggplot with consistent naming
-save_plot <- function(plot, filename_prefix, condition, current_date,
-                      width = 12.5, height = 10, dpi = 500) {
-  filename <- file.path(output_wd, paste0(filename_prefix, condition, "_", current_date, ".png"))
-  ggsave(filename, plot = plot, width = width, height = height, dpi = dpi)
-}
-
-# =============================================================================
 #                          HOMER Motif Plot Functions
 # =============================================================================
+# These use tab-delimited knownResults.txt and standardize column names.
+
+.read_homer_known <- function(path = "knownResults.txt") {
+  if (!file.exists(path)) stop("Missing HOMER file: ", path)
+  df <- read.delim(path, header = TRUE, sep = "\t", quote = "", comment.char = "")
+  names(df) <- make.names(names(df))  # e.g., "Log.P.value", "Motif.Name"
+  # Strip "(...)" from motif names
+  if ("Motif.Name" %in% names(df)) df$Motif.Name <- sub("\\(.*$", "", df$Motif.Name)
+  df
+}
 
 create_motif_plot_c <- function(input_dir, condition, final_cond, total_rows, top_n, output_dir) {
   homer_temp_dir <- file.path(input_dir, final_cond)
   knownresult_wd <- file.path(homer_temp_dir, paste0(final_cond, "_", condition, "_accessible_homer_output"))
   if (!dir.exists(knownresult_wd)) stop("Missing HOMER dir: ", knownresult_wd)
-  setwd(knownresult_wd)
 
-  homer_results <- read.table("knownResults.txt", sep = "\t", header = FALSE, fill = TRUE, colClasses = "character")
-  data <- homer_results[-1, ]
-  data$V1 <- gsub("\\(.*$", "", data$V1)
-  colnames(data) <- c("Motif_Name", "Consensus", "Pval", "Log_P_value", "Qval",
-                      "NumTarget", "PctTarget", "NumBackground", "PctBackground")
-  data$Log_P_value <- as.numeric(data$Log_P_value)
+  df <- .read_homer_known(file.path(knownresult_wd, "knownResults.txt"))
+  if (!"Log.P.value" %in% names(df)) stop("HOMER file lacks 'Log.P.value' column.")
 
-  top_data <- data %>% arrange(desc(-Log_P_value)) %>% slice(1:total_rows)
+  top_data <- df %>% arrange(desc(Log.P.value)) %>% slice(1:total_rows)
   top_data$row <- seq_len(nrow(top_data))
   top_data <- top_data %>% mutate(is_top_n = if_else(row <= top_n, paste("Top", top_n), "Others"))
   top_n_data <- top_data %>% slice(1:top_n)
 
-  motif_plot <- ggplot(top_data, aes(x = row, y = -Log_P_value, color = is_top_n)) +
+  motif_plot <- ggplot(top_data, aes(x = row, y = Log.P.value, color = is_top_n)) +
     geom_point(size = 1) +
     scale_color_manual(values = c(setNames("#327538", paste("Top", top_n)), "Others" = "#DDDDDD")) +
-    geom_text_repel(data = top_n_data, aes(label = Motif_Name),
+    geom_text_repel(data = top_n_data, aes(label = Motif.Name),
                     box.padding = 0.5, point.padding = 0.1, segment.color = "grey50",
                     size = 4, force = 5, nudge_x = max(top_data$row) * 0.15,
                     direction = "y", hjust = 0, segment.size = 0.2, max.overlaps = Inf) +
     my_ggplot_theme + theme(legend.position = "right") +
-    labs(title = paste0(final_cond, "_", condition), x = "Rank", y = "-log10(P.value)")
+    labs(title = paste0(final_cond, "_", condition), x = "Rank", y = "Log10(P.value)")
 
-  setwd(homer_temp_dir)
-  write.table(data, paste0(final_cond, "_", condition, "_knownResults.txt"), row.names = FALSE, col.names = TRUE, sep = "\t")
+  # Save a tidy copy of table we plotted
+  write.table(df, file.path(homer_temp_dir, paste0(final_cond, "_", condition, "_knownResults_clean.txt")),
+              row.names = FALSE, col.names = TRUE, sep = "\t", quote = FALSE)
 
-  setwd(output_dir)
-  filename <- paste0("Homer_motif_plot_", final_cond, "_", condition, "_", current_date, ".png")
-  ggsave(filename, plot = motif_plot, width = 3.125, height = 4, dpi = 500)
+  ggsave(file.path(output_wd, paste0("Homer_motif_plot_", final_cond, "_", condition, "_", current_date, ".png")),
+         plot = motif_plot, width = 3.125, height = 4, dpi = 500)
 }
 
 create_motif_plot_v3 <- function(file_name, direction, total_rows, top_n, output_dir, color_val, custom_dir = NULL) {
   wd <- if (!is.null(custom_dir)) {
-    paste0(custom_dir, "/", direction, "_for_homer_", file_name, "_output")
+    file.path(custom_dir, paste0(direction, "_for_homer_", file_name, "_output"))
   } else {
-    paste0(homer_wd, "/", direction, "_for_homer_", file_name, "_output")
+    file.path(homer_wd, paste0(direction, "_for_homer_", file_name, "_output"))
   }
-  if (!tryCatch({ setwd(wd); TRUE }, error = function(e) FALSE)) stop("Could not set wd: ", wd)
+  if (!dir.exists(wd)) stop("Could not set wd: ", wd)
 
-  data <- read.table("knownResults.txt", header = TRUE, sep = "\t", quote = "", comment.char = "", fill = TRUE)
-  data$`Motif.Name` <- sub("\\(.*", "", data$`Motif.Name`)
-  top_data <- data %>% arrange(desc(-Log.P.value)) %>% slice(1:total_rows)
+  df <- .read_homer_known(file.path(wd, "knownResults.txt"))
+  if (!"Log.P.value" %in% names(df)) stop("HOMER file lacks 'Log.P.value' column.")
+
+  top_data <- df %>% arrange(desc(Log.P.value)) %>% slice(1:total_rows)
   top_data$row <- seq_len(nrow(top_data))
   top_data$is_top_n <- ifelse(top_data$row <= top_n, paste("Top", top_n), "Others")
   top_n_data <- top_data[1:top_n, ]
 
-  motif_plot <- ggplot(top_data, aes(x = row, y = -Log.P.value, color = is_top_n)) +
+  motif_plot <- ggplot(top_data, aes(x = row, y = Log.P.value, color = is_top_n)) +
     geom_point(size = 2) +
     scale_color_manual(name = "TFs", values = c(setNames(color_val, paste("Top", top_n)), "Others" = "#DDDDDD")) +
     geom_text_repel(data = top_n_data, aes(label = Motif.Name),
@@ -322,12 +355,11 @@ create_motif_plot_v3 <- function(file_name, direction, total_rows, top_n, output
                     size = 5, force = 10, nudge_x = max(top_data$row) * 0.15,
                     direction = "y", hjust = 0, segment.size = 0.2, max.overlaps = Inf, show.legend = FALSE) +
     my_ggplot_theme + theme(legend.position = "right") +
-    labs(title = paste0(direction, " ", file_name), x = "Rank", y = "-log10(P.value)") +
+    labs(title = paste0(direction, " ", file_name), x = "Rank", y = "Log10(P.value)") +
     theme(plot.title = element_text(size = 10))
 
-  setwd(output_dir)
-  filename <- paste0("top_", direction, "_", file_name, "_homer_motif_plot_", current_date, ".png")
-  ggsave(filename, plot = motif_plot, width = 3.125, height = 4, dpi = 500)
+  ggsave(file.path(output_wd, paste0("top_", direction, "_", file_name, "_homer_motif_plot_", current_date, ".png")),
+         plot = motif_plot, width = 3.125, height = 4, dpi = 500)
 }
 
 replicate_peak_overlap_function <- function(data, donor, sample_name) {
@@ -338,21 +370,21 @@ replicate_peak_overlap_function <- function(data, donor, sample_name) {
 }
 
 create_motif_plot_master_list <- function(file_name, direction, total_rows, top_n, output_dir, color_val, custom_dir = NULL) {
-  wd <- if (!is.null(custom_dir)) paste0(custom_dir, "/", direction, "_for_homer_", file_name, "_output")
-  else paste0(homer_wd, "/", direction, "_for_homer_", file_name, "_output")
+  wd <- if (!is.null(custom_dir)) file.path(custom_dir, paste0(direction, "_for_homer_", file_name, "_output"))
+  else file.path(homer_wd, paste0(direction, "_for_homer_", file_name, "_output"))
   if (!dir.exists(wd)) stop("Missing HOMER dir: ", wd)
-  setwd(wd)
 
-  data <- read.table("knownResults.txt", header = TRUE, sep = "\t", quote = "", comment.char = "", fill = TRUE)
-  data$`Motif.Name` <- sub("\\(.*", "", data$`Motif.Name`)
-  top_data <- data %>% arrange(desc(-Log.P.value)) %>% slice(1:total_rows)
+  df <- .read_homer_known(file.path(wd, "knownResults.txt"))
+  if (!"Log.P.value" %in% names(df)) stop("HOMER file lacks 'Log.P.value' column.")
+
+  top_data <- df %>% arrange(desc(Log.P.value)) %>% slice(1:total_rows)
   top_data$row <- seq_len(nrow(top_data))
   top_data$is_top_n <- ifelse(top_data$row <= top_n, paste("Top", top_n), "Others")
   top_n_data <- top_data[1:top_n, ]
 
   motif_master_list_a <- top_data %>% select(Motif.Name, Consensus)
 
-  motif_plot <- ggplot(top_data, aes(x = row, y = -Log.P.value, color = is_top_n)) +
+  motif_plot <- ggplot(top_data, aes(x = row, y = Log.P.value, color = is_top_n)) +
     geom_point(size = 2) +
     scale_color_manual(name = "TFs", values = c(setNames(color_val, paste("Top", top_n)), "Others" = "#DDDDDD")) +
     geom_text_repel(data = top_n_data, aes(label = Motif.Name),
@@ -361,12 +393,10 @@ create_motif_plot_master_list <- function(file_name, direction, total_rows, top_
                     direction = "y", hjust = 0, segment.size = 0.2,
                     max.overlaps = Inf, show.legend = FALSE) +
     my_ggplot_theme + theme(legend.position = "right") +
-    labs(title = element_text(size = 10, face = "bold", color = "black", family = "sans"),
-         x = "Rank", y = "-log10(P.value)")
+    labs(title = paste0(direction, " ", file_name), x = "Rank", y = "Log10(P.value)")
 
-  setwd(output_dir)
-  filename <- paste0("top_", direction, "_", file_name, "_homer_motif_plot_", current_date, ".png")
-  ggsave(filename, plot = motif_plot, width = 3.125, height = 4, dpi = 500)
+  ggsave(file.path(output_wd, paste0("top_", direction, "_", file_name, "_homer_motif_plot_", current_date, ".png")),
+         plot = motif_plot, width = 3.125, height = 4, dpi = 500)
 
   motif_master_list_a
 }
@@ -383,14 +413,13 @@ create_motif_plot_both <- function(file_name, total_rows, top_n, output_dir, col
   if (!dir.exists(wd_decreased) || !file.exists(decreased_file)) stop("Missing: ", decreased_file)
 
   read_homer_data <- function(dir_path, direction_label) {
-    setwd(dir_path)
-    data <- read.table("knownResults.txt", header = TRUE, sep = "\t", quote = "", comment.char = "", fill = TRUE)
-    data$Motif.Name <- sub("\\(.*", "", data$Motif.Name)
-    top_data <- data %>% arrange(desc(-`Log.P.value`)) %>% slice(1:total_rows)
+    df <- .read_homer_known(file.path(dir_path, "knownResults.txt"))
+    if (!"Log.P.value" %in% names(df)) stop("HOMER file lacks 'Log.P.value' column.")
+    top_data <- df %>% arrange(desc(Log.P.value)) %>% slice(1:total_rows)
     top_data$Rank <- seq_len(nrow(top_data))
     top_data$is_top_n <- ifelse(top_data$Rank <= top_n, paste0("Top_", top_n), "Others")
     if (direction_label == "decreased") top_data$Rank <- -top_data$Rank
-    top_data %>% select(Motif.Name, `Log.P.value`, Rank, is_top_n)
+    top_data %>% select(Motif.Name, Log.P.value, Rank, is_top_n)
   }
 
   increased_data <- read_homer_data(wd_increased, "increased")
@@ -406,7 +435,7 @@ create_motif_plot_both <- function(file_name, total_rows, top_n, output_dir, col
 
   top_n_data <- merged_data %>% filter(is_top_n == paste0("Top_", top_n))
 
-  motif_plot <- ggplot(merged_data, aes(x = Rank, y = -`Log.P.value`)) +
+  motif_plot <- ggplot(merged_data, aes(x = Rank, y = Log.P.value)) +
     geom_point(aes(color = plot_color), size = 2) +
     scale_color_identity() +
     geom_text_repel(data = top_n_data, aes(label = Motif.Name, color = plot_color),
@@ -418,11 +447,10 @@ create_motif_plot_both <- function(file_name, total_rows, top_n, output_dir, col
     scale_x_continuous(breaks = seq(-total_rows, total_rows, by = total_rows/2),
                        labels = abs(seq(-total_rows, total_rows, by = total_rows/2))) +
     my_ggplot_theme + theme(legend.position = "none") +
-    labs(title = paste0("HOMER: ", file_name), x = "Motif Rank", y = "-log10(P-value)")
+    labs(title = paste0("HOMER: ", file_name), x = "Motif Rank", y = "Log10(P-value)")
 
-  setwd(output_wd)
-  filename <- file.path(output_wd, paste0("HOMER_combined_", file_name, "_homer_motif_plot_", current_date, ".png"))
-  ggsave(filename, plot = motif_plot, width = 4.5, height = 6, dpi = 500)
+  ggsave(file.path(output_wd, paste0("HOMER_combined_", file_name, "_homer_motif_plot_", current_date, ".png")),
+         plot = motif_plot, width = 4.5, height = 6, dpi = 500)
 }
 
 # =============================================================================
@@ -448,6 +476,11 @@ function_for_upset_plot <- function(deseq_options_df, comparison_col) {
   collapsed_matrix <- collapsed %>%
     pivot_wider(names_from = !!comparison_sym, values_from = present, values_fill = 0) %>%
     column_to_rownames("Interval")
+
+  if (ncol(collapsed_matrix) < 2 || sum(colSums(collapsed_matrix) > 0) == 0) {
+    message("Skipping UpSetR: not enough non-empty groups for ", rlang::as_string(comparison_sym))
+    return(invisible(NULL))
+  }
 
   png(file = file.path(output_wd, paste0("upsetR_shared_peaks_", current_date, "_", comparison_col, ".png")),
       width = 1800, height = 1200, res = 120)
@@ -486,8 +519,8 @@ function_for_upset_plot_by_compA <- function(comp_a_group, deseq_df = deseq_opti
     pivot_wider(names_from = Comp_D, values_from = present, values_fill = 0) %>%
     column_to_rownames("Interval")
 
-  if (ncol(collapsed_matrix) < 2) {
-    message("Skipping ", comp_a_group, ": fewer than 2 Comp_D groups.")
+  if (ncol(collapsed_matrix) < 2 || sum(colSums(collapsed_matrix) > 0) == 0) {
+    message("Skipping ", comp_a_group, ": fewer than 2 non-empty Comp_D groups.")
     return(NULL)
   }
 
