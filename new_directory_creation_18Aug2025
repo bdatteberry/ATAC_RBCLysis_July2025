@@ -1,26 +1,23 @@
-# -----------------------------------------------------------------------------
-# Create & Validate Working Directories (User-specific paths)
-# -----------------------------------------------------------------------------
+# =============================================================================
+#                       Directory_creation.r  (AUTO-PATHS + SAVE)
+# =============================================================================
+# Requires: main_wd and current_date to be defined by caller (e.g., 01_Settings.r)
+# Falls back to sensible defaults if not present.
 
-# Helper: today's date stamp for foldering
-current_date <- format(Sys.Date(), "%Y-%m-%d")
+if (!exists("main_wd")) {
+  main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+}
+if (!exists("current_date")) {
+  current_date <- toupper(format(Sys.Date(), "%d%b%y"))
+}
 
-# Helper: safe dir create
+# --- Helpers -----------------------------------------------------------------
 create_dir <- function(path) {
-  if (!dir.exists(path)) {
-    dir.create(path, recursive = TRUE, showWarnings = FALSE)
-    message("Created: ", path)
-  } else {
-    message("Exists:  ", path)
-  }
+  if (!dir.exists(path)) dir.create(path, recursive = TRUE)
   invisible(path)
 }
 
-# Main project working directory
-main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
-create_dir(main_wd)
-
-# Define subdirectories using file.path
+# --- Core Working Dirs -------------------------------------------------------
 macs_wd           <- file.path(main_wd, "macs")
 scale_wd          <- file.path(main_wd, "scale")
 deseq_wd          <- file.path(main_wd, "R")
@@ -31,67 +28,90 @@ rep_overlap_wd    <- file.path(output_wd, "replicate_normalized")
 pre_deseq_reps_wd <- file.path(rep_overlap_wd, "pre_DESeq_counts")
 homer_r_wd        <- file.path(rep_overlap_wd, "HOMER_post_processing")
 
-# Optional merged/DESeq output directories
-merged_norm_wd                   <- file.path(output_wd, "merged_normalized")                  # Might not be needed
-deseq_dds_folder                 <- file.path(merged_norm_wd, "DESeq_dds_output")              # Might not be needed
-deseq_dds_folder_reps_overlap    <- file.path(rep_overlap_wd, "DESeq_dds_output_reps_overlap") # Might not be needed
+# --- Script & Snapshot Dirs --------------------------------------------------
+scripts_wd   <- file.path(main_wd, "scripts")
+snapshots_wd <- file.path(scripts_wd, "_snapshots", current_date)
 
-# Optional: separate DESeq output dir (same as output_wd here)
-deseq_output_wd <- output_wd
+# Optional DESeq/merged dirs
+merged_norm_wd                <- file.path(output_wd, "merged_normalized")
+deseq_dds_folder              <- file.path(merged_norm_wd, "DESeq_dds_output")
+deseq_dds_folder_reps_overlap <- file.path(rep_overlap_wd, "DESeq_dds_output_reps_overlap")
 
-# Collect all directories into one list and create them
-dir_list <- list(
-  macs_wd,
-  scale_wd,
-  deseq_wd,
-  output_wd,
-  homer_wd,
-  seq_stats_wd,
-  rep_overlap_wd,
-  merged_norm_wd,
-  deseq_dds_folder,
-  deseq_dds_folder_reps_overlap,
-  pre_deseq_reps_wd,
-  homer_r_wd
-)
-invisible(lapply(dir_list, create_dir))
+# Files produced by split/count steps (so other scripts know where to look)
+file_a <- file.path(scale_wd, "consensus_peaks_first_six_columns.txt")
+file_b <- file.path(scale_wd, "consensus_peaks_sorted_bam_columns.txt")
 
-# -----------------------------------------------------------------------------
-# Reference files (placeholders for later steps)
-# -----------------------------------------------------------------------------
-counts_file   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.featureCounts_1.txt"
-homer_annot   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks_annotated_HOMER.txt"
-coldata_file  <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
-peak_bed_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mLb.clN.bed"
+# --- Make the directories ----------------------------------------------------
+invisible(lapply(list(
+  main_wd, macs_wd, scale_wd, deseq_wd, output_wd, homer_wd,
+  seq_stats_wd, rep_overlap_wd, pre_deseq_reps_wd, homer_r_wd,
+  merged_norm_wd, deseq_dds_folder, deseq_dds_folder_reps_overlap,
+  scripts_wd, snapshots_wd
+), create_dir))
 
-# -----------------------------------------------------------------------------
-# Persist a shared config so later scripts can source the same paths
-# -----------------------------------------------------------------------------
-paths <- list(
-  current_date = current_date,
-  main_wd = main_wd,
-  macs_wd = macs_wd,
-  scale_wd = scale_wd,
-  deseq_wd = deseq_wd,
-  output_wd = output_wd,
-  deseq_output_wd = deseq_output_wd,
-  seq_stats_wd = seq_stats_wd,
-  rep_overlap_wd = rep_overlap_wd,
-  pre_deseq_reps_wd = pre_deseq_reps_wd,
-  homer_wd = homer_wd,
-  homer_r_wd = homer_r_wd,
-  merged_norm_wd = merged_norm_wd,
-  deseq_dds_folder = deseq_dds_folder,
-  deseq_dds_folder_reps_overlap = deseq_dds_folder_reps_overlap,
-  counts_file = counts_file,
-  homer_annot = homer_annot,
-  coldata_file = coldata_file,
-  peak_bed_file = peak_bed_file
-)
+# Publish default scripts location so future helpers save into scripts/
+options(project.scripts_wd = scripts_wd)
 
-saveRDS(paths, file.path(main_wd, "paths.Rds"))
-message("Saved path config to: ", file.path(main_wd, "paths.Rds"))
+# --- Persist a reusable paths script (+ RDS) ---------------------------------
+.write_paths_R <- function(outfile = file.path(scripts_wd, "00_auto_paths.R")) {
+  lines <- c(
+    sprintf('current_date <- "%s"', current_date),
+    sprintf('main_wd <- "%s"', main_wd),
+    sprintf('macs_wd <- "%s"', macs_wd),
+    sprintf('scale_wd <- "%s"', scale_wd),
+    sprintf('deseq_wd <- "%s"', deseq_wd),
+    sprintf('output_wd <- "%s"', output_wd),
+    sprintf('homer_wd <- "%s"', homer_wd),
+    sprintf('seq_stats_wd <- "%s"', seq_stats_wd),
+    sprintf('rep_overlap_wd <- "%s"', rep_overlap_wd),
+    sprintf('pre_deseq_reps_wd <- "%s"', pre_deseq_reps_wd),
+    sprintf('homer_r_wd <- "%s"', homer_r_wd),
+    sprintf('merged_norm_wd <- "%s"', merged_norm_wd),
+    sprintf('deseq_dds_folder <- "%s"', deseq_dds_folder),
+    sprintf('deseq_dds_folder_reps_overlap <- "%s"', deseq_dds_folder_reps_overlap),
+    sprintf('scripts_wd <- "%s"', scripts_wd),
+    sprintf('snapshots_wd <- "%s"', snapshots_wd),
+    sprintf('file_a <- "%s"', file_a),
+    sprintf('file_b <- "%s"', file_b),
+    '',
+    sprintf('options(project.scripts_wd = "%s")', scripts_wd),
+    '',
+    '# Helper (idempotent):',
+    'create_dir <- function(path){ if(!dir.exists(path)) dir.create(path, recursive = TRUE); invisible(path) }'
+  )
+  writeLines(lines, con = outfile)
+  message("Wrote auto-paths script: ", outfile)
+}
 
-# (In later scripts)
-# paths <- readRDS(file.path("/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis", "paths.Rds"))
-# attach(paths)  # optional, or refer to paths$macs_wd, etc.
+.save_paths_Rds <- function(outfile = file.path(main_wd, "paths.Rds")) {
+  paths <- list(
+    current_date = current_date,
+    main_wd = main_wd,
+    macs_wd = macs_wd,
+    scale_wd = scale_wd,
+    deseq_wd = deseq_wd,
+    output_wd = output_wd,
+    homer_wd = homer_wd,
+    seq_stats_wd = seq_stats_wd,
+    rep_overlap_wd = rep_overlap_wd,
+    pre_deseq_reps_wd = pre_deseq_reps_wd,
+    homer_r_wd = homer_r_wd,
+    merged_norm_wd = merged_norm_wd,
+    deseq_dds_folder = deseq_dds_folder,
+    deseq_dds_folder_reps_overlap = deseq_dds_folder_reps_overlap,
+    scripts_wd = scripts_wd,
+    snapshots_wd = snapshots_wd,
+    file_a = file_a,
+    file_b = file_b
+  )
+  saveRDS(paths, outfile)
+  message("Wrote paths RDS:        ", outfile)
+}
+
+.write_paths_R()
+.save_paths_Rds()
+
+message("✅ Directories ready under: ", main_wd)
+message("✅ Output date folder:      ", output_wd)
+message("✅ Scripts folder:          ", scripts_wd)
+message("✅ Snapshots folder:        ", snapshots_wd)
