@@ -1,7 +1,7 @@
+#!/usr/bin/env Rscript
 # =============================================================================
 #                             ATAC-Seq Pipeline Starter
-# =============================================================================
-# Optimized Libraries & Functions
+#                 (uses dynamic date/paths from 00_auto_paths.R)
 # =============================================================================
 
 # ---- Load Libraries ---------------------------------------------------------
@@ -24,133 +24,61 @@ suppressPackageStartupMessages({
   library(umap)
 })
 
-# ---- Globals: Date & Directory Scaffold -------------------------------------
+# ---- Bootstrap paths & today's date (LA time) -------------------------------
+# Expect that you've already run Directory_creation.r once today.
+# It writes scripts/00_auto_paths.R which recomputes the date at source-time.
 
-current_date <- toupper(format(Sys.Date(), "%d%b%y"))
+# Fallback default for where your project lives (only used if option not set)
+if (!exists("main_wd")) {
+  main_wd <- "/Users/brandiatteberry/Desktop/ATACseq_Nextflow"
+}
+main_wd   <- sub("/+$", "", main_wd)
 
-# Helper: Create directory if missing
+# Find scripts folder, prefer the global option set by Directory_creation.r
+scripts_wd <- getOption("project.scripts_wd", file.path(main_wd, "scripts"))
+auto_paths <- file.path(scripts_wd, "00_auto_paths.R")
+if (!file.exists(auto_paths)) {
+  stop("Missing ", auto_paths, 
+       "\nRun Directory_creation.r first to create today's folders and 00_auto_paths.R.")
+}
+source(auto_paths)  # defines current_date, output_wd, homer_wd, file_a, file_b, etc.
+
+# Helper to ensure dirs exist (idempotent)
 create_dir <- function(dir_path) {
   if (!dir.exists(dir_path)) dir.create(dir_path, recursive = TRUE)
   invisible(dir_path)
 }
 
-# Main project working directory (YOUR PATHS)
-main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
-create_dir(main_wd)
+# Make sure all expected output dirs for *today* exist
+invisible(lapply(list(
+  main_wd, macs_wd, scale_wd, deseq_wd, output_wd, homer_wd,
+  seq_stats_wd, rep_overlap_wd, pre_deseq_reps_wd, homer_r_wd,
+  merged_norm_wd, deseq_dds_folder, deseq_dds_folder_reps_overlap,
+  scripts_wd, snapshots_wd
+), create_dir))
 
-# ---- NEW: Scripts & Snapshots -----------------------------------------------
-scripts_wd   <- file.path(main_wd, "scripts")
-snapshots_wd <- file.path(scripts_wd, "_snapshots", current_date)
-invisible(lapply(list(scripts_wd, snapshots_wd), create_dir))
+message("✅ Using date tag: ", current_date)
+message("✅ Outputs -> ", output_wd)
 
-# Publish default scripts location so future helpers save into scripts/
-options(project.scripts_wd = scripts_wd)
-
-# Helper: write auto-paths script any script can source
-.write_auto_paths <- function(outfile = file.path(scripts_wd, "00_auto_paths.R")) {
-  lines <- c(
-    sprintf('current_date <- "%s"', current_date),
-    sprintf('main_wd <- "%s"', main_wd),
-    sprintf('macs_wd <- "%s"', file.path(main_wd, "macs")),
-    sprintf('scale_wd <- "%s"', file.path(main_wd, "scale")),
-    sprintf('deseq_wd <- "%s"', file.path(main_wd, "R")),
-    sprintf('output_wd <- "%s"', file.path(main_wd, "R", current_date)),
-    sprintf('homer_wd <- "%s"', file.path(main_wd, "R", "Homer", current_date)),
-    sprintf('seq_stats_wd <- "%s"', file.path(main_wd, "seq_stats")),
-    sprintf('rep_overlap_wd <- "%s"', file.path(main_wd, "R", current_date, "replicate_normalized")),
-    sprintf('pre_deseq_reps_wd <- "%s"', file.path(main_wd, "R", current_date, "replicate_normalized", "pre_DESeq_counts")),
-    sprintf('homer_r_wd <- "%s"', file.path(main_wd, "R", current_date, "replicate_normalized", "HOMER_post_processing")),
-    sprintf('merged_norm_wd <- "%s"', file.path(main_wd, "R", current_date, "merged_normalized")),
-    sprintf('deseq_dds_folder <- "%s"', file.path(main_wd, "R", current_date, "merged_normalized", "DESeq_dds_output")),
-    sprintf('deseq_dds_folder_reps_overlap <- "%s"', file.path(main_wd, "R", current_date, "replicate_normalized", "DESeq_dds_output_reps_overlap")),
-    sprintf('scripts_wd <- "%s"', scripts_wd),
-    sprintf('snapshots_wd <- "%s"', snapshots_wd),
-    sprintf('file_a <- "%s"', file.path(main_wd, "scale", "consensus_peaks_first_six_columns.txt")),
-    sprintf('file_b <- "%s"', file.path(main_wd, "scale", "consensus_peaks_sorted_bam_columns.txt")),
-    '',
-    sprintf('options(project.scripts_wd = "%s")', scripts_wd),
-    '',
-    'create_dir <- function(path){ if(!dir.exists(path)) dir.create(path, recursive = TRUE); invisible(path) }'
-  )
-  writeLines(lines, con = outfile)
-  message("Wrote auto-paths script: ", outfile)
-}
-
-# Helper: snapshot this script when run via Rscript
-.save_self_snapshot <- function(dest_dir = snapshots_wd) {
-  args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- sub("^--file=", "", args[grep("^--file=", args)])
-  if (length(file_arg) == 0 || !nzchar(file_arg)) return(invisible(NULL))
-  src <- normalizePath(file_arg, mustWork = FALSE)
-  if (!file.exists(src)) return(invisible(NULL))
-  create_dir(dest_dir)
-  stamp  <- format(Sys.time(), "%Y%m%d_%H%M%S")
-  target <- file.path(dest_dir, paste0(basename(src), ".", stamp, ".R"))
-  if (file.copy(src, target, overwrite = TRUE)) {
-    message("📄 Saved script snapshot: ", target)
-  }
-  invisible(target)
-}
-
-# Write auto-paths now; snapshot if applicable
-.write_auto_paths()
-.save_self_snapshot()
-
-# Subdirectories
-macs_wd           <- file.path(main_wd, "macs")
-scale_wd          <- file.path(main_wd, "scale")
-deseq_wd          <- file.path(main_wd, "R")
-output_wd         <- file.path(deseq_wd, current_date)
-homer_wd          <- file.path(deseq_wd, "Homer", current_date)
-seq_stats_wd      <- file.path(main_wd, "seq_stats")
-rep_overlap_wd    <- file.path(output_wd, "replicate_normalized")
-pre_deseq_reps_wd <- file.path(rep_overlap_wd, "pre_DESeq_counts")
-homer_r_wd        <- file.path(rep_overlap_wd, "HOMER_post_processing")
-
-# Optional merged/DESeq output directories
-merged_norm_wd                <- file.path(output_wd, "merged_normalized")
-deseq_dds_folder              <- file.path(merged_norm_wd, "DESeq_dds_output")
-deseq_dds_folder_reps_overlap <- file.path(rep_overlap_wd, "DESeq_dds_output_reps_overlap")
-
-# If you want a separate DESeq output dir (same as output_wd here)
-deseq_output_wd <- output_wd
-
-# Create directories
-dir_list <- list(
-  macs_wd, scale_wd, deseq_wd, output_wd, homer_wd,
-  seq_stats_wd, rep_overlap_wd, merged_norm_wd,
-  deseq_dds_folder, deseq_dds_folder_reps_overlap,
-  pre_deseq_reps_wd, homer_r_wd
-)
-invisible(lapply(dir_list, create_dir))
-
-# Reference files (YOUR PATHS)
+# ---- Reference files (YOUR PATHS) -------------------------------------------
 counts_file   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.featureCounts_1.txt"
 homer_annot   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks_annotated_HOMER.txt"
 coldata_file  <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
 peak_bed_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mLb.clN.bed"
 boolean_file  <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.boolean.txt"
 
-# Split featureCounts files written by your earlier step(s)
-file_first_six   <- file.path(scale_wd, "consensus_peaks_first_six_columns.txt")
-file_bam_columns <- file.path(scale_wd, "consensus_peaks_sorted_bam_columns.txt")
+# Split featureCounts files (these are also defined in 00_auto_paths.R as file_a / file_b)
+file_first_six   <- file_a
+file_bam_columns <- file_b
 
-# Alias to match helpers that expect file_a/file_b
-file_a <- file_first_six
-file_b <- file_bam_columns
-
-# Sanity check key refs (non-fatal for split files, since they may be produced later)
+# Sanity check key refs (non-fatal for split files which may be produced later)
 must_exist <- c(counts_file, homer_annot, coldata_file, peak_bed_file, boolean_file)
 missing <- must_exist[!file.exists(must_exist)]
 if (length(missing) > 0) {
   stop("Missing required reference file(s):\n", paste0(" - ", missing, collapse = "\n"))
 }
 
-message("✅ Directories ready under: ", main_wd)
-message("✅ Outputs will go to: ", output_wd)
-message("✅ Scripts folder: ", scripts_wd)
-
-# ---- Custom ggplot2 Theme ---------------------------------------------------
+# ---- Plot Theme -------------------------------------------------------------
 my_ggplot_theme <- theme_classic() +
   theme(
     text         = element_text(color = "black"),
@@ -163,8 +91,6 @@ my_ggplot_theme <- theme_classic() +
 # =============================================================================
 #                             Utility Functions
 # =============================================================================
-
-# Quick peek + row count
 w <- function(a) { print(head(a)); print(nrow(a)) }
 
 # =============================================================================
@@ -241,7 +167,7 @@ check_and_source_script <- function() {
     if (file.exists(script_path)) {
       system(paste("sh", shQuote(script_path)))
     } else {
-      stop("The script awk_consensusPeak_filtering_mergedsamples.sh does not exist in the script directory.")
+      stop("Missing helper shell script: ", script_path)
     }
   }
 }
@@ -585,7 +511,6 @@ function_for_upset_plot_by_compA <- function(comp_a_group, deseq_df = deseq_opti
   dev.off()
 
   collapsed_matrix$overlaps <- rowSums(collapsed_matrix)
-  # quick summary table (invisibly return a small summary df too)
   n_shared    <- sum(collapsed_matrix$overlaps == 2)
   n_null_only <- sum(collapsed_matrix[, 1] == 1 & collapsed_matrix[, 2] == 0)
   n_rbc_only  <- sum(collapsed_matrix[, 1] == 0 & collapsed_matrix[, 2] == 1)
