@@ -1,0 +1,264 @@
+# make sure to download these files from Azure to generate
+# Define the standard Nextflow file names (should not change)
+ indiv_file_1 <- "multiqc_samtools_stats_1.txt"
+ indiv_file_2 <- "mqc_samtools_alignment_plot-3_1.txt"
+ indiv_file_3 <- "mqc_samtools-idxstats-mapped-reads-plot-2_Normalised_Counts.txt"
+ indiv_file_4 <- "multiqc_mlib_frip_score-plot.txt"
+ indiv_file_5 <- "multiqc_mlib_peak_annotation-plot.txt"
+#!/usr/bin/env Rscript
+
+# ===================== QC RULES =====================
+QC_THRESHOLDS <- list(
+  min_unique_reads_M = 5,
+  min_mapped_reads_M = 10,   # 10 million mapped reads
+  min_frip           = 0.2,
+  max_dup_perc       = 50,
+  max_chrM_perc      = 10,
+  min_peaks          = 5000  # 5k peaks
+)
+
+# ===================== PATHS =====================
+base_dir <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training"
+f_align   <- file.path(base_dir, "mqc_samtools_alignment_plot-3_1.txt")
+f_idxnorm <- file.path(base_dir, "mqc_samtools-idxstats-mapped-reads-plot-2_Normalised_Counts.txt")
+f_frip    <- file.path(base_dir, "multiqc_mlib_frip_score-plot.txt")
+f_peak    <- file.path(base_dir, "multiqc_mlib_peak_annotation-plot.txt")
+f_stats   <- file.path(base_dir, "multiqc_samtools_stats_1.txt")
+f_sheet   <- file.path(base_dir, "samplesheet.valid.csv")
+out_csv   <- file.path(base_dir, "Individual_seq_stats_output.csv")
+
+# ===================== LIBS =====================
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(stringr)
+  library(tidyr); library(purrr); library(janitor)
+})
+cat0 <- function(...) cat(paste0(..., collapse=""), "\n")
+
+# ===================== HELPERS =====================
+safe_read <- function(path){
+  if(!file.exists(path)) stop("Missing file: ", path)
+  ext <- tolower(tools::file_ext(path))
+  df <- if (ext == "csv") read_csv(path, show_col_types = FALSE) else {
+    tmp <- tryCatch(read_tsv(path, show_col_types = FALSE), error = function(e) NULL)
+    if (is.null(tmp) || ncol(tmp) == 1) read_csv(path, show_col_types = FALSE) else tmp
+  }
+  clean_names(df)
+}
+
+normalize_id <- function(x){
+  x %>% as.character() %>%
+    str_replace("^.*/", "") %>%
+    str_replace("_R[12]_001\\.(fastq|fq)\\.gz$", "") %>%
+    str_replace("\\.bam$", "") %>%
+    str_replace("\\.(fastq|fq)\\.gz$", "") %>%
+    str_replace("([_-])T[0-9]+$", "") %>%
+    str_trim()
+}
+
+ensure_sample <- function(df, prefer=c(
+  "sample","nextflow_replicate_id","nextflow_sample_id","sample_id",
+  "run_id","Run_ID","fastq_1","fastq1","fastq_2","fastq2"
+)){
+  if (!("sample" %in% names(df))){
+    hit <- intersect(prefer, names(df))
+    if (length(hit)==0) stop("No usable sample key in a table.")
+    key <- hit[1]
+    df <- df %>% mutate(sample = if (grepl("^fastq", key)) basename(.data[[key]]) else .data[[key]])
+  }
+  df %>% mutate(sample = normalize_id(sample))
+}
+
+rename_first_match <- function(df, target, patterns){
+  for (p in patterns){
+    idx <- grep(p, names(df), perl=TRUE, ignore.case=TRUE)
+    if (length(idx)>=1){
+      nm <- names(df)[idx[1]]
+      if (!(target %in% names(df))) names(df)[names(df)==nm] <- target
+      break
+    }
+  }
+  df
+}
+
+# ===================== READ =====================
+cat0("Reading inputs…")
+
+sheet <- safe_read(f_sheet) %>% ensure_sample()
+
+align <- safe_read(f_align) %>%
+  ensure_sample() %>%
+  rename_first_match("mapped", c("^mapped$","mapped[_ ]?reads","reads[_ ]?mapped")) %>%
+  select(any_of(c("sample","mapped"))) %>% distinct()
+
+stats <- safe_read(f_stats) %>%
+  ensure_sample() %>%
+  rename_first_match("raw_total_sequences", c("^raw_total_sequences$","total[_ ]?sequences")) %>%
+  rename_first_match("average_frag_length", c("^average_length$","avg|frag")) %>%
+  rename_first_match("reads_mapped_percent", c("^reads_mapped_percent$","percent[_ ]?mapped")) %>%
+  rename_first_match("dup_perc", c("^reads_duplicated_percent$","duplicate.*%|dup")) %>%
+  select(any_of(c("sample","raw_total_sequences","average_frag_length","reads_mapped_percent","dup_perc"))) %>%
+  distinct()
+
+# idxstats: chrM%
+idx_raw <- safe_read(f_idxnorm) %>% ensure_sample()
+chr_cols <- grep("^chr.?m(.*perc|.*percent)?$|mito|^mt$", names(idx_raw), ignore.case=TRUE, value=TRUE)
+idxnorm <- if (length(chr_cols)>=1) {
+  ccol <- chr_cols[1]
+  tibble(sample = normalize_id(idx_raw$sample),
+         chrM_perc = suppressWarnings(as.numeric(idx_raw[[ccol]])) *
+                     ifelse(grepl("perc|percent", ccol, ignore.case=TRUE), 1, 100))
+} else tibble(sample=character(0), chrM_perc=numeric(0))
+
+# FRiP diagonal from wide table
+frip_raw <- safe_read(f_frip) %>% ensure_sample()
+avail <- names(frip_raw)
+want  <- make_clean_names(frip_raw$sample)
+alt   <- ifelse(startsWith(want,"x"), substring(want,2), paste0("x", want))
+pick_col <- function(w){
+  j <- which(want==w)
+  if (w %in% avail) return(w)
+  if (length(j) && alt[j] %in% avail) return(alt[j])
+  NA_character_
+}
+use_cols <- vapply(want, pick_col, character(1))
+frip_vals <- purrr::map_dbl(seq_len(nrow(frip_raw)), function(i){
+  jn <- use_cols[i]; if (is.na(jn)) return(NA_real_)
+  suppressWarnings(as.numeric(frip_raw[[jn]][i]))
+})
+frip <- tibble(sample = frip_raw$sample, FRiP = frip_vals)
+
+# Peak annotation + total peaks
+peak <- safe_read(f_peak) %>%
+  ensure_sample() %>%
+  rename(Intergenic = any_of("intergenic"),
+         TTS        = any_of("tts"),
+         Unassigned = any_of("unassigned"),
+         exon       = any_of("exon"),
+         intron     = any_of("intron"),
+         `promoter.TSS` = any_of("promoter_tss")) %>%
+  mutate(peaks = rowSums(across(any_of(c("Intergenic","TTS","Unassigned","exon","intron","promoter.TSS")),
+                                ~ suppressWarnings(as.numeric(.))), na.rm=TRUE)) %>%
+  select(sample, Intergenic, TTS, Unassigned, exon, intron, `promoter.TSS`, peaks)
+
+# ===================== MERGE =====================
+cat0("Merging…")
+merged <- sheet %>%
+  left_join(stats,  by="sample") %>%
+  left_join(align,  by="sample") %>%
+  left_join(frip,   by="sample") %>%
+  left_join(peak,   by="sample") %>%
+  left_join(idxnorm,by="sample")
+
+# ===================== METRICS =====================
+merged <- merged %>%
+  mutate(
+    mapped              = suppressWarnings(as.numeric(mapped)),
+    raw_total_sequences = suppressWarnings(as.numeric(raw_total_sequences)),
+    dup_perc            = suppressWarnings(as.numeric(dup_perc)),
+    average_frag_length = suppressWarnings(as.numeric(average_frag_length)),
+    chrM_perc           = suppressWarnings(as.numeric(chrM_perc)),
+    FRiP                = suppressWarnings(as.numeric(FRiP)),
+    mapped_reads_M      = ifelse(!is.na(mapped), mapped/1e6, NA_real_)
+  ) %>%
+  mutate(
+    dup_frac = case_when(
+      is.na(dup_perc)               ~ NA_real_,
+      dup_perc <= 1                 ~ dup_perc,
+      dup_perc > 1 & dup_perc <=100 ~ dup_perc/100,
+      TRUE                          ~ NA_real_
+    ),
+    duplicated_reads_M = ifelse(!is.na(mapped_reads_M) & !is.na(dup_frac),
+                                mapped_reads_M * dup_frac, NA_real_),
+    unique_reads_M     = ifelse(!is.na(mapped_reads_M) & !is.na(dup_frac),
+                                mapped_reads_M * (1 - dup_frac), NA_real_),
+    mapping_perc       = dplyr::coalesce(
+                           ifelse(!is.na(mapped) & !is.na(raw_total_sequences) & raw_total_sequences > 0,
+                                  100 * mapped / raw_total_sequences, NA_real_),
+                           suppressWarnings(as.numeric(reads_mapped_percent))
+                         )
+  )
+
+# ===================== QC (Remove only if reads OR peaks fail) =====================
+th <- QC_THRESHOLDS
+merged <- merged %>%
+  mutate(
+    mapped_reads_M_fail = ifelse(is.na(mapped_reads_M), NA_integer_,
+                                 as.integer(mapped_reads_M < th$min_mapped_reads_M)),
+    peaks_fail          = ifelse(is.na(peaks),          NA_integer_,
+                                 as.integer(peaks < th$min_peaks)),
+    FRiP_fail           = ifelse(is.na(FRiP),           NA_integer_,
+                                 as.integer(FRiP < th$min_frip)),
+    chrM_perc_fail      = ifelse(is.na(chrM_perc),      NA_integer_,
+                                 as.integer(chrM_perc > th$max_chrM_perc)),
+    dup_perc_fail       = ifelse(is.na(dup_perc),       NA_integer_,
+                                 as.integer(dup_perc > th$max_dup_perc))
+  ) %>%
+  mutate(
+    total_score = rowSums(across(c(mapped_reads_M_fail, peaks_fail, FRiP_fail, chrM_perc_fail, dup_perc_fail)),
+                          na.rm = TRUE),
+    remove_or_flag = case_when(
+      coalesce(mapped_reads_M_fail, 0L) == 1L | coalesce(peaks_fail, 0L) == 1L ~ "Remove",
+      coalesce(FRiP_fail, 0L) == 1L | coalesce(chrM_perc_fail, 0L) == 1L | coalesce(dup_perc_fail, 0L) == 1L ~ "Flag",
+      TRUE ~ "Pass"
+    )
+  )
+
+# ===================== BUILD DISPLAY 'sample' & FINAL OUTPUT =====================
+# Prefer ID columns in this order; use what exists
+pref_ids <- c("nextflow_replicate_id","nextflow_sample_id","sample_id","sample")
+avail    <- intersect(pref_ids, names(merged))
+
+merged$sample_src <- NA_character_
+for (nm in avail) {
+  merged$sample_src <- ifelse(is.na(merged$sample_src) | merged$sample_src == "",
+                              merged[[nm]], merged$sample_src)
+}
+
+merged <- merged %>%
+  mutate(
+    sample = normalize_id(sample_src),
+    sample = ifelse(grepl("_T[0-9]+$", sample), sample, paste0(sample, "_T1"))
+  ) %>%
+  select(-sample_src)
+
+# Ensure Sample_ID exists so select() never fails
+if (!any(c("Sample_ID","sample_id") %in% names(merged))) merged$Sample_ID <- NA_character_
+
+# Friendly rounding for final output
+merged <- merged %>%
+  mutate(
+    unique_reads_M      = round(unique_reads_M, 2),
+    mapping_perc        = round(mapping_perc, 2),
+    duplicated_reads_M  = round(duplicated_reads_M, 2),
+    dup_perc            = round(dup_perc, 2),
+    mapped_reads_M      = round(mapped_reads_M, 2),
+    average_frag_length = round(average_frag_length, 1),
+    chrM_perc           = round(chrM_perc, 1),
+    FRiP                = round(FRiP, 2),
+    Intergenic          = as.integer(round(Intergenic)),
+    TTS                 = as.integer(round(TTS)),
+    Unassigned          = as.integer(round(Unassigned)),
+    exon                = as.integer(round(exon)),
+    intron              = as.integer(round(intron)),
+    `promoter.TSS`      = as.integer(round(`promoter.TSS`)),
+    peaks               = as.integer(round(peaks))
+  )
+
+# Final order: A=sample, B=Sample_ID, then replicate/Run_ID, then metrics/flags
+out <- merged %>%
+  select(
+    sample,
+    Sample_ID = any_of(c("Sample_ID","sample_id")),
+    replicate = any_of(c("replicate","Replicate")),
+    Run_ID    = any_of(c("Run_ID","run_id")),
+    unique_reads_M, mapping_perc, duplicated_reads_M, dup_perc, mapped_reads_M,
+    average_frag_length, chrM_perc, FRiP, Intergenic, TTS, Unassigned,
+    exon, intron, `promoter.TSS`, peaks,
+    mapped_reads_M_fail, peaks_fail, FRiP_fail, chrM_perc_fail, dup_perc_fail,
+    total_score, remove_or_flag
+  )
+
+# ===================== WRITE =====================
+write_csv(out, out_csv, na = "")
+cat0("✅ Wrote: ", out_csv, " (rows: ", nrow(out), ")")
+
