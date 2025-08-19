@@ -4,35 +4,113 @@
 # =============================================================================
 # - Uses your ATACseq_Analysis project + RBC_Lysis_Bioinformatics_training files
 # - Saves outputs under: /Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis/R/<DATE>
-# - Robust QC ID detection and DESeq input fallback
+# - If deseq_input_merged_samples.csv is missing, auto-build a skeleton from the
+#   counts header (or samplesheet fallback) and save it to today's output_wd.
 # =============================================================================
 
 suppressPackageStartupMessages({ library(tidyverse) })
 
-# ---- Project roots -----------------------------------------------------------
-main_wd      <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
-script_dir   <- file.path(main_wd, "scripts")
-current_date <- "18Aug25"  # or: toupper(format(Sys.Date(), "%d%b%y"))
+# ---- Project roots & dynamic date/output dir ---------------------------------
+main_wd    <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+script_dir <- file.path(main_wd, "scripts")
+auto_paths <- file.path(script_dir, "00_auto_paths.R")
 
-# Source helpers created earlier
-source(file.path(script_dir, "Function_list.r"))
-source(file.path(script_dir, "Directory_creation.r"))   # defines output_wd, seq_stats_wd, deseq_wd, etc.
+if (file.exists(auto_paths)) {
+  ap <- new.env(parent = emptyenv())
+  sys.source(auto_paths, envir = ap)  # defines current_date, output_wd, etc.
+  current_date <- ap$current_date
+  output_wd    <- ap$output_wd
+} else {
+  tz <- getOption("project.tz", "America/Los_Angeles")
+  d  <- as.Date(format(as.POSIXct(Sys.time(), tz = tz), "%Y-%m-%d"))
+  current_date <- toupper(format(d, "%d%b%y"))
+  output_wd    <- file.path(main_wd, "R", current_date)
+  if (!dir.exists(output_wd)) dir.create(output_wd, recursive = TRUE)
+}
+options(project.scripts_wd = script_dir)
+
+# (Optional helpers—leave commented unless you need them)
+# source(file.path(script_dir, "Function_list.r"))
+# source(file.path(script_dir, "Directory_creation.r"))
+
+# ---- Paths to upstream inputs (READ FROM ONLY) -------------------------------
+training_dir <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training"
+counts_candidates <- c(
+  file.path(training_dir, "consensus_peaks.mRp.clN.featureCounts_1.txt")
+)
+# Also look under the project root in case counts live there
+counts_candidates <- c(
+  counts_candidates,
+  suppressWarnings(list.files(main_wd, pattern = "featureCounts.*\\.txt$", recursive = TRUE,
+                              full.names = TRUE, ignore.case = TRUE))
+)
+counts_file <- dplyr::first(counts_candidates[file.exists(counts_candidates)])
+
+samplesheet_file <- if (file.exists(file.path(training_dir, "samplesheet.valid.csv"))) {
+  file.path(training_dir, "samplesheet.valid.csv")
+} else {
+  ss <- suppressWarnings(list.files(main_wd, pattern = "samplesheet.*\\.csv$", recursive = TRUE,
+                                    full.names = TRUE, ignore.case = TRUE))
+  dplyr::first(ss)
+}
+
+# ---- Files we WRITE (always inside ATACseq_Analysis) -------------------------
+# QC summary now comes from the builder in ATACseq_Analysis/R/<DATE>/
+input_data_df    <- file.path(output_wd, "individual_seq_stats_output.csv")
+# Merged DESeq colData (we generate it here if missing)
+deseq_input_file <- file.path(output_wd, "deseq_input_merged_samples.csv")
+# Fallback: individual-sample colData (READ ONLY, if you still have it)
+deseq_input_reps_file <- file.path(training_dir, "coldata_for_DESeq2.csv")
+sample_rename_file    <- file.path(training_dir, "sample_rename.csv")
 
 # =============================================================================
-#                       Download files from nextflow (notes)
+#                           Build DESeq colData if missing
 # =============================================================================
-# Put nextflow outputs into:
-#   - macs_wd : merged_library/macs2/narrow_peak/consensus/
-#   - scale_wd: merged_library/bigwig/scale/
+get_counts_columns <- function(path) {
+  if (is.null(path) || !file.exists(path)) return(character(0))
+  hdr <- suppressMessages(readr::read_tsv(path, n_max = 0, show_col_types = FALSE))
+  cn  <- names(hdr)
+  ann_known <- c("Geneid","Chr","Start","End","Strand","Length")
+  if (all(ann_known %in% cn)) setdiff(cn, ann_known) else if (length(cn) > 6) cn[7:length(cn)] else character(0)
+}
+samples_from_samplesheet <- function(path) {
+  if (is.null(path) || !file.exists(path)) return(character(0))
+  df <- suppressMessages(readr::read_csv(path, show_col_types = FALSE))
+  if ("sample" %in% names(df)) as.character(df$sample) else as.character(df[[1]])
+}
 
-{
-# ---- Input Files (YOUR absolute paths) ---------------------------------------
-input_data_df         <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/individual_seq_stats_output.csv"
-deseq_input_file      <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/deseq_input_merged_samples.csv" # may be missing
-deseq_input_reps_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
-sample_rename_file    <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/sample_rename.csv"
+maybe_make_deseq_coldata <- function(out_csv, counts_path, samplesheet_path) {
+  if (file.exists(out_csv)) return(invisible(TRUE))
+  smp <- unique(get_counts_columns(counts_path))
+  src <- "counts header"
+  if (!length(smp)) {
+    smp <- unique(samples_from_samplesheet(samplesheet_path))
+    src <- "samplesheet"
+  }
+  if (!length(smp)) return(invisible(FALSE))
 
-# ---- Thresholds & Options ----------------------------------------------------
+  skeleton <- tibble::tibble(
+    sample    = smp,
+    condition = NA_character_,
+    Comp_A    = NA_character_,   # keep both for compatibility
+    Donor     = NA_character_,
+    replicate = NA_character_,
+    Comp_B    = NA_character_,
+    Comp_C    = NA_character_,
+    Comp_D    = NA_character_,
+    batch     = NA_character_,
+    timepoint = NA_character_
+  )
+  suppressMessages(readr::write_csv(skeleton, out_csv, na = ""))
+  message("✅ Created DESeq skeleton from ", src, ": ", out_csv)
+  TRUE
+}
+
+invisible(maybe_make_deseq_coldata(deseq_input_file, counts_file, samplesheet_file))
+
+# =============================================================================
+#                               User Options / Knobs
+# =============================================================================
 thresholds         <- "Y"     # run QC?
 num_overlaps_ratio <- 0.65
 sample_rename      <- "N"
@@ -49,33 +127,20 @@ flagged_threshold_list <- list(
 )
 
 # ---- Plot/DESeq knobs --------------------------------------------------------
-deseq_comparison_option <- "Comp_A"
+deseq_comparison_option <- "condition"   # prefer 'condition'; script will fall back if missing
 pca_variance_numbers    <- 5
 deseq_padj_cutoff       <- 4
 deseq_log2fc_cutoff     <- 2
 volcano_plot_zoom       <- c(5, 40)
 
-sig_windows        <- 0.01
-pval_thresh_quant  <- 0.01
-baseMean_threshold <- 10
-top_windows        <- 2000
+sig_windows         <- 0.01
+pval_thresh_quant   <- 0.01
+baseMean_threshold  <- 10
+top_windows         <- 2000
 black_white_heatmap <- "N"
 
-# ---- Color Options -----------------------------------------------------------
-tol_palette <- c("#DDDDDD", "#2E2585", "#327538", "#5DA899", "#95CBEC", "#DCCD7D", "#C26A77", "#9F4A96", "#7E2954")
-red_blue_base_palette <- c("#0F65AB", "#3993C3", "#8EC4DE", "#D1E5F0", "#F9F9F9", "#0F65AB", "#F6A482", "#D75F4C", "#B31429")
-heatmap_colors <- colorRampPalette(c("#0F65AB", "#F9F9F9", "#B31429"))(100)
-heatmap_breaks <- seq(-4, 4, length.out = length(heatmap_colors) + 1)
-
-if (black_white_heatmap == "Y") {
-  mid2mid <- colorRampPalette(c("black", "gray80"))(50)
-  neg2pos <- colorRampPalette(c("gray80", "white"))(51)
-  heatmap_colors_bw <- c(mid2mid, neg2pos)
-  heatmap_breaks_bw <- seq(-4, 4, length.out = length(heatmap_colors_bw) + 1)
-}
-
 # =============================================================================
-#                               SAMPLE QC
+#                                   SAMPLE QC
 # =============================================================================
 choose_first_present <- function(nms, candidates) {
   cand <- candidates[candidates %in% nms]
@@ -114,7 +179,9 @@ if (thresholds == "Y") {
     # Pick an existing ID column
     id_col <- choose_first_present(
       names(seq_stats_import),
-      c("nextflow_replicate_ID","nextflow_sample_ID","replicate_id","sample","Sample","sample_id","library","library_id")
+      c("sample","Sample","Sample_ID","sample_id",
+        "nextflow_replicate_ID","nextflow_sample_ID","replicate_id",
+        "library","library_id")
     )
     if (is.na(id_col)) {
       id_col <- "row_index"
@@ -122,7 +189,6 @@ if (thresholds == "Y") {
       message("⚠️ No obvious ID column found in QC CSV; using row numbers as IDs.")
     }
 
-    # Keep only the columns that actually exist
     keep_cols <- intersect(
       c(id_col, "mapped_reads_M_fail","peaks_fail","FRiP_fail","chrM_perc_fail","dup_perc_fail","remove_or_flag","total_score"),
       names(seq_stats_import)
@@ -143,25 +209,25 @@ if (thresholds == "Y") {
 # =============================================================================
 #                        DESeq OPTIONS / CONDITIONS
 # =============================================================================
-# Use merged file if present; otherwise fall back to coldata_for_DESeq2.csv
 use_merged <- file.exists(deseq_input_file)
 if (use_merged) {
   deseq_options      <- read.csv(deseq_input_file, header = TRUE, check.names = FALSE)
-  deseq_options_reps <- read.csv(deseq_input_reps_file, header = TRUE, check.names = FALSE)
+  # If you also keep an individual-samples table, you can still load it:
+  deseq_options_reps <- if (file.exists(deseq_input_reps_file))
+    read.csv(deseq_input_reps_file, header = TRUE, check.names = FALSE) else deseq_options
 } else {
-  message("⚠️ DESeq merged-samples CSV not found at:\n   ", deseq_input_file,
-          "\n   → Falling back to individual-samples CSV: ", deseq_input_reps_file)
-  if (!file.exists(deseq_input_reps_file)) stop("Neither DESeq CSV exists. Check paths.")
+  message("⚠️ Merged DESeq CSV not found at:\n   ", deseq_input_file)
+  if (!file.exists(deseq_input_reps_file)) stop("Neither merged nor individual DESeq CSV exists. Check paths.")
+  message("   → Falling back to individual-samples CSV: ", deseq_input_reps_file)
   deseq_options      <- read.csv(deseq_input_reps_file, header = TRUE, check.names = FALSE)
   deseq_options_reps <- deseq_options
 }
 
-# Ensure comparison column exists
+# Ensure comparison column exists (quiet fallback)
 if (!deseq_comparison_option %in% names(deseq_options)) {
-  alts <- c("Comp_A","Comp_B","condition","Condition","group","Group")
+  alts <- c("condition","Comp_A","Comp_B","Condition","group","Group")
   hit  <- alts[alts %in% names(deseq_options)]
   if (length(hit) == 0) stop("No comparison column found (looked for: ", paste(c(deseq_comparison_option, alts), collapse=", "), ").")
-  message("⚠️ Column '", deseq_comparison_option, "' not found; using '", hit[1], "'.")
   deseq_comparison_option <- hit[1]
 }
 
@@ -178,11 +244,20 @@ filtered_counts_unsorted_file <- paste0("all_consensus_peaks_nonsorted_with_over
 filtered_counts_file          <- paste0("all_consensus_peaks_sorted_with_overlap_filter_replicate_samples_",  current_date, ".txt")
 consensus_peaks_file          <- "consensus_peaks.mRp.clN.annotatePeaks.txt"
 
-# ---- Colors for Comp_A -------------------------------------------------------
-comp_a_colors <- c(
-  "untreated" = tol_palette[1], "HSA" = tol_palette[2], "DMSO" = tol_palette[3],
-  "PMA" = tol_palette[4], "TNFalpha" = tol_palette[5], "fMLP" = tol_palette[6],
-  "C5a" = tol_palette[7], "CI" = tol_palette[8]
-)
+# ---- Colors (auto-built to whatever groups exist) ----------------------------
+tol_palette <- c("#DDDDDD", "#2E2585", "#327538", "#5DA899", "#95CBEC", "#DCCD7D", "#C26A77", "#9F4A96", "#7E2954")
+comp_levels   <- sort(unique(as.character(deseq_options[[deseq_comparison_option]])))
+comp_a_colors <- setNames(rep_len(tol_palette, length(comp_levels)), comp_levels)
 
-} # end block
+# Optional grayscale heatmap palette
+red_blue_base_palette <- c("#0F65AB", "#3993C3", "#8EC4DE", "#D1E5F0", "#F9F9F9", "#0F65AB", "#F6A482", "#D75F4C", "#B31429")
+heatmap_colors <- colorRampPalette(c("#0F65AB", "#F9F9F9", "#B31429"))(100)
+heatmap_breaks <- seq(-4, 4, length.out = length(heatmap_colors) + 1)
+if (black_white_heatmap == "Y") {
+  mid2mid <- colorRampPalette(c("black", "gray80"))(50)
+  neg2pos <- colorRampPalette(c("gray80", "white"))(51)
+  heatmap_colors_bw <- c(mid2mid, neg2pos)
+  heatmap_breaks_bw <- seq(-4, 4, length.out = length(heatmap_colors_bw) + 1)
+}
+
+# ----------------------------- End of 01_Settings.r ---------------------------
