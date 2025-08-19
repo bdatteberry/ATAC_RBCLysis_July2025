@@ -1,0 +1,97 @@
+# -----------------------------------------------------------------------------
+# Create & Validate Working Directories (User-specific paths)
+# -----------------------------------------------------------------------------
+
+# Helper: today's date stamp for foldering
+current_date <- format(Sys.Date(), "%Y-%m-%d")
+
+# Helper: safe dir create
+create_dir <- function(path) {
+  if (!dir.exists(path)) {
+    dir.create(path, recursive = TRUE, showWarnings = FALSE)
+    message("Created: ", path)
+  } else {
+    message("Exists:  ", path)
+  }
+  invisible(path)
+}
+
+# Main project working directory
+main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+create_dir(main_wd)
+
+# Define subdirectories using file.path
+macs_wd           <- file.path(main_wd, "macs")
+scale_wd          <- file.path(main_wd, "scale")
+deseq_wd          <- file.path(main_wd, "R")
+output_wd         <- file.path(deseq_wd, current_date)
+homer_wd          <- file.path(deseq_wd, "Homer", current_date)
+seq_stats_wd      <- file.path(main_wd, "seq_stats")
+rep_overlap_wd    <- file.path(output_wd, "replicate_normalized")
+pre_deseq_reps_wd <- file.path(rep_overlap_wd, "pre_DESeq_counts")
+homer_r_wd        <- file.path(rep_overlap_wd, "HOMER_post_processing")
+
+# Optional merged/DESeq output directories
+merged_norm_wd                   <- file.path(output_wd, "merged_normalized")                  # Might not be needed
+deseq_dds_folder                 <- file.path(merged_norm_wd, "DESeq_dds_output")              # Might not be needed
+deseq_dds_folder_reps_overlap    <- file.path(rep_overlap_wd, "DESeq_dds_output_reps_overlap") # Might not be needed
+
+# Optional: separate DESeq output dir (same as output_wd here)
+deseq_output_wd <- output_wd
+
+# Collect all directories into one list and create them
+dir_list <- list(
+  macs_wd,
+  scale_wd,
+  deseq_wd,
+  output_wd,
+  homer_wd,
+  seq_stats_wd,
+  rep_overlap_wd,
+  merged_norm_wd,
+  deseq_dds_folder,
+  deseq_dds_folder_reps_overlap,
+  pre_deseq_reps_wd,
+  homer_r_wd
+)
+invisible(lapply(dir_list, create_dir))
+
+# -----------------------------------------------------------------------------
+# Reference files (placeholders for later steps)
+# -----------------------------------------------------------------------------
+counts_file   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.featureCounts_1.txt"
+homer_annot   <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks_annotated_HOMER.txt"
+coldata_file  <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
+peak_bed_file <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mLb.clN.bed"
+
+# -----------------------------------------------------------------------------
+# Persist a shared config so later scripts can source the same paths
+# -----------------------------------------------------------------------------
+paths <- list(
+  current_date = current_date,
+  main_wd = main_wd,
+  macs_wd = macs_wd,
+  scale_wd = scale_wd,
+  deseq_wd = deseq_wd,
+  output_wd = output_wd,
+  deseq_output_wd = deseq_output_wd,
+  seq_stats_wd = seq_stats_wd,
+  rep_overlap_wd = rep_overlap_wd,
+  pre_deseq_reps_wd = pre_deseq_reps_wd,
+  homer_wd = homer_wd,
+  homer_r_wd = homer_r_wd,
+  merged_norm_wd = merged_norm_wd,
+  deseq_dds_folder = deseq_dds_folder,
+  deseq_dds_folder_reps_overlap = deseq_dds_folder_reps_overlap,
+  counts_file = counts_file,
+  homer_annot = homer_annot,
+  coldata_file = coldata_file,
+  peak_bed_file = peak_bed_file
+)
+
+saveRDS(paths, file.path(main_wd, "paths.Rds"))
+message("Saved path config to: ", file.path(main_wd, "paths.Rds"))
+
+# (In later scripts)
+# paths <- readRDS(file.path("/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis", "paths.Rds"))
+# attach(paths)  # optional, or refer to paths$macs_wd, etc.
