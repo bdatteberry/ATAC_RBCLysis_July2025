@@ -1,0 +1,254 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+#            02_Count_Processing.r  (modular; auto-detect boolean schema)
+# =============================================================================
+# Works with:
+#   FEATURE_COUNTS_FILE = consensus_peaks.mRp.clN.featureCounts.txt
+#   BOOLEAN_FILE        = consensus_peaks.mRp.clN.boolean.txt  (donor/condition cols)
+#                      or consensus_peaks.mLb.clN.boolean.txt  (replicate cols)
+#   COLDATA_FILE        = coldata_for_DESeq2.csv
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(UpSetR)
+})
+
+# --------------------------- Load paths & helpers -----------------------------
+scripts_wd <- file.path("/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis", "scripts")
+source(file.path(scripts_wd, "00_auto_paths.R"))
+if (file.exists(file.path(scripts_wd, "Function_list.r"))) {
+  source(file.path(scripts_wd, "Function_list.r"))  # optional theme/helpers
+}
+
+# ------------------------ Your input file locations ---------------------------
+FEATURE_COUNTS_FILE <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.featureCounts.txt"
+BOOLEAN_FILE        <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mRp.clN.boolean.txt"
+# If you want replicate-level booleans instead, use:
+# BOOLEAN_FILE     <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/consensus_peaks.mLb.clN.boolean.txt"
+COLDATA_FILE        <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training/coldata_for_DESeq2.csv"
+
+# ------------------------ Fallbacks if 01 wasn't sourced ----------------------
+if (!exists("current_date"))       current_date <- toupper(format(Sys.Date(), "%d%b%y"))
+if (!exists("num_overlaps_ratio")) num_overlaps_ratio <- 0.65
+
+if (!exists("filtered_counts_unsorted_file"))
+  filtered_counts_unsorted_file <- paste0("all_consensus_peaks_nonsorted_with_overlap_filter_replicate_samples_", current_date, ".txt")
+if (!exists("filtered_counts_file"))
+  filtered_counts_file <- paste0("all_consensus_peaks_sorted_with_overlap_filter_replicate_samples_",  current_date, ".txt")
+
+if (!exists("create_dir")) {
+  create_dir <- function(p){ if(!dir.exists(p)) dir.create(p, recursive = TRUE); invisible(p) }
+}
+
+# ------------------ Split featureCounts -> scale/ helper files ----------------
+file_a <- file.path(scale_wd, "consensus_peaks_first_six_columns.txt")
+file_b <- file.path(scale_wd, "consensus_peaks_sorted_bam_columns.txt")
+
+if (!file.exists(file_a) || !file.exists(file_b)) {
+  if (!file.exists(FEATURE_COUNTS_FILE)) {
+    stop("Missing featureCounts file: ", FEATURE_COUNTS_FILE)
+  }
+  fc_raw <- read.table(FEATURE_COUNTS_FILE, header = TRUE, comment.char = "#",
+                       check.names = FALSE, sep = "\t")
+  write.table(fc_raw[, 1:6],            file_a, sep = "\t", row.names = FALSE, quote = FALSE)
+  write.table(fc_raw[, 7:ncol(fc_raw)], file_b, sep = "\t", row.names = FALSE, quote = FALSE)
+  message("✅ Wrote split featureCounts files in scale/: ",
+          basename(file_a), " & ", basename(file_b))
+}
+
+# ------------------------ Read split files and harmonize ----------------------
+data_a <- read.table(file_a, header = TRUE, sep = "\t", check.names = FALSE) %>%
+  rename(chr = Chr, start = Start, end = End)
+data_b <- read.table(file_b, header = TRUE, sep = "\t", check.names = FALSE)
+
+# Clean column names to sample IDs used elsewhere
+trim_bam  <- function(x) sub("\\.[^.]+\\.clN\\.sorted\\.bam$", "", basename(x))
+trim_bool <- function(x) sub("\\.[^.]+\\.clN\\.bool$",        "", basename(x))
+
+colnames(data_b) <- trim_bam(colnames(data_b))
+rownames(data_b) <- data_a$Geneid
+data_b_export    <- tibble(Interval = data_a$Geneid) %>% bind_cols(as_tibble(data_b))
+data_b_df        <- left_join(data_b_export, data_a, by = c("Interval" = "Geneid"))
+
+# --------------------- Read and normalize boolean table -----------------------
+if (!file.exists(BOOLEAN_FILE)) stop("Boolean file not found at: ", BOOLEAN_FILE)
+boolean_raw <- read.table(BOOLEAN_FILE, header = TRUE, sep = "\t",
+                          check.names = FALSE, as.is = TRUE)
+
+# Build Interval key (Interval / interval_id / chr:start:end; case-insensitive)
+nm_low <- tolower(names(boolean_raw))
+grab   <- function(key) names(boolean_raw)[which(nm_low == key)][1]
+if ("interval" %in% nm_low) {
+  iv <- grab("interval");    boolean_raw$Interval <- as.character(boolean_raw[[iv]])
+} else if ("interval_id" %in% nm_low) {
+  iv <- grab("interval_id"); boolean_raw$Interval <- as.character(boolean_raw[[iv]])
+} else if (all(c("chr","start","end") %in% nm_low)) {
+  ch <- grab("chr"); st <- grab("start"); en <- grab("end")
+  boolean_raw$Interval <- paste(boolean_raw[[ch]], boolean_raw[[st]], boolean_raw[[en]], sep=":")
+} else {
+  stop("Could not determine an Interval/coordinate key in the boolean file.\n",
+       "Columns present: ", paste(head(names(boolean_raw), 30), collapse=", "))
+}
+
+# Keep only *.bool columns, cast to integer, and trim names
+bool_cols_raw <- grep("\\.bool$", names(boolean_raw), value = TRUE)
+if (length(bool_cols_raw) == 0) stop("No *.bool columns found in ", BOOLEAN_FILE)
+boolean_treated <- boolean_raw %>%
+  dplyr::select(Interval, dplyr::all_of(bool_cols_raw)) %>%
+  dplyr::mutate(dplyr::across(-Interval, ~ as.integer(.)))
+names(boolean_treated)[-1] <- trim_bool(names(boolean_treated)[-1])
+
+# Detect boolean schema: replicate vs donor/condition
+bool_names <- names(boolean_treated)[-1]
+boolean_is_replicate <- any(grepl("_REP\\d+$", bool_names))
+message("✔ Boolean schema detected: ",
+        if (boolean_is_replicate) "replicate-level (…_REP#)" else "donor/condition-level (no _REP)")
+
+# ------------------------- Read coldata (samples/condition) -------------------
+if (!file.exists(COLDATA_FILE)) stop("Coldata file not found: ", COLDATA_FILE)
+coldata <- read.csv(COLDATA_FILE, check.names = FALSE)
+
+# Standardize to {sample_raw -> sample}, {condition -> condition_label}
+if ("sample" %in% names(coldata)) {
+  coldata <- coldata %>% rename(sample_raw = sample)
+} else if ("samples" %in% names(coldata)) {
+  coldata <- coldata %>% rename(sample_raw = samples)
+} else stop("Coldata must have a 'sample' or 'samples' column.")
+
+if ("condition" %in% names(coldata)) {
+  coldata <- coldata %>% rename(condition_label = condition)
+} else {
+  alt <- c("Comp_A","Comp_B","Condition","group","Group")
+  hit <- alt[alt %in% names(coldata)]
+  if (length(hit) == 0) stop("Need a 'condition' column (or one of: Comp_A, Comp_B, Condition, group, Group).")
+  coldata <- coldata %>% rename(condition_label = !!rlang::sym(hit[1]))
+}
+
+# Trim to sample IDs used in counts; also derive "unit" that matches boolean cols
+coldata <- coldata %>%
+  mutate(sample = trim_bam(sample_raw),
+         unit   = if (boolean_is_replicate) sample else sub("_REP\\d+$", "", sample))
+
+# ------------------------------ QC removals (from 01) -------------------------
+remove_ids <- character(0)
+if (exists("sample_remove") && is.data.frame(sample_remove) && ncol(sample_remove) >= 1) {
+  id_col  <- names(sample_remove)[1]
+  ids_vec <- as.character(sample_remove[[id_col]])
+  remove_ids <- unique(c(ids_vec, trim_bam(ids_vec), trim_bool(ids_vec)))
+}
+
+# Keep only boolean units present and not QC-removed
+present_units <- intersect(unique(coldata$unit), bool_names)
+if (length(present_units) == 0) {
+  message("Example boolean cols: ", paste(head(bool_names, 8), collapse=", "))
+  message("Example coldata samples: ", paste(head(coldata$sample, 8), collapse=", "))
+  stop("No overlap between coldata (after trimming) and boolean columns.")
+}
+message("✔ matched boolean units: ", length(present_units))
+
+coldata_filt <- coldata %>%
+  filter(unit %in% present_units, !sample %in% remove_ids) %>%
+  select(sample, unit, condition_label) %>%
+  distinct()
+
+# Drop absent/removed from boolean matrix
+boolean_treated_filtered <- boolean_treated %>%
+  select(Interval, all_of(unique(coldata_filt$unit)))
+
+# ----------------------- Compute per-condition overlaps -----------------------
+final_overlap_peaks <- list()
+
+for (cond in sort(unique(coldata_filt$condition_label))) {
+  # if boolean_is_replicate == FALSE, 'unit' is per-donor/condition (no _REP)
+  cond_units <- unique(coldata_filt$unit[coldata_filt$condition_label == cond])
+  if (length(cond_units) == 0) next
+
+  mat <- boolean_treated_filtered %>% select(Interval, all_of(cond_units))
+  thr <- ceiling(num_overlaps_ratio * length(cond_units))  # required TRUEs across units
+
+  keep_df <- mat %>%
+    mutate(sums = rowSums(across(-Interval))) %>%
+    filter(sums >= thr) %>%
+    select(Interval, all_of(cond_units))
+
+  if (nrow(keep_df) > 0) final_overlap_peaks[[cond]] <- keep_df
+  message(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          " ", cond, ": kept ", nrow(keep_df), " intervals (",
+          length(cond_units), " units; thr=", thr, ").")
+}
+
+# --------------------- Build filtered replicate matrix & write -----------------
+create_dir(pre_deseq_reps_wd)
+setwd(pre_deseq_reps_wd)
+
+# Always write the unsorted counts (all replicates, all intervals)
+write.table(
+  data_b_df,
+  file = filtered_counts_unsorted_file,
+  sep = "\t", quote = FALSE, row.names = FALSE
+)
+
+if (length(final_overlap_peaks) == 0) {
+  message("⚠️ No conditions produced overlapping intervals; wrote only the unsorted counts:\n - ",
+          file.path(pre_deseq_reps_wd, filtered_counts_unsorted_file))
+} else {
+  # union of all kept intervals across conditions
+  iv_union <- unique(unlist(lapply(final_overlap_peaks, `[[`, "Interval")))
+
+  # replicate counts to carry forward (drop removed replicates)
+  counts_cols <- setdiff(intersect(names(data_b_df), coldata_filt$sample), remove_ids)
+
+  consensus_peaks_filtered <- data_b_df %>%
+    filter(Interval %in% iv_union) %>%
+    select(Interval, all_of(counts_cols), chr, start, end)
+
+  write.table(
+    consensus_peaks_filtered,
+    file = filtered_counts_file,
+    sep = "\t", quote = FALSE, row.names = FALSE
+  )
+
+  message(Sys.time(), " Wrote:\n - ", file.path(pre_deseq_reps_wd, filtered_counts_unsorted_file),
+          "\n - ", file.path(pre_deseq_reps_wd, filtered_counts_file))
+
+  # ----------------------------------- Plots ----------------------------------
+  if (!exists("my_ggplot_theme")) {
+    my_ggplot_theme <- theme_classic() +
+      theme(text = element_text(color = "black"),
+            plot.title = element_text(hjust = 0.5, size = rel(1.5)))
+  }
+
+  # Bar plot: intervals per condition
+  df_counts <- tibble(
+    condition = names(final_overlap_peaks),
+    n_rows    = vapply(final_overlap_peaks, nrow, integer(1))
+  )
+
+  peaks_bar_plot <- ggplot(df_counts, aes(x = condition, y = n_rows)) +
+    geom_col() +
+    geom_text(aes(label = n_rows), vjust = -0.5, size = 3) +
+    labs(x = "Condition", y = "Number of Overlapping Peaks",
+         title = "Overlap Peak Counts per Condition") +
+    my_ggplot_theme +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(paste0("peaks_per_condition_filtered_", current_date, ".png"),
+         plot = peaks_bar_plot, width = 8, height = 8, dpi = 500)
+
+  # UpSetR (one set per condition)
+  sets_list <- lapply(final_overlap_peaks, function(df) unique(df$Interval))
+  png(paste0("upsetR_plot_condition_overlaps_", current_date, ".png"),
+      width = 1800, height = 1000, res = 120)
+  upset(
+    data           = fromList(sets_list),
+    order.by       = "freq",
+    keep.order     = TRUE,
+    main.bar.color = "grey",
+    matrix.color   = "#7E2945",
+    text.scale     = 1.25,
+    mb.ratio       = c(0.7, 0.3)
+  )
+  dev.off()
+
+  message(Sys.time(), " ✅ Finished 02_Count_Processing.r")
+}
