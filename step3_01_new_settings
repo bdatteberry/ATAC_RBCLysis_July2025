@@ -12,7 +12,7 @@ suppressPackageStartupMessages({ library(tidyverse) })
 # ---- Project roots -----------------------------------------------------------
 main_wd      <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
 script_dir   <- file.path(main_wd, "scripts")
-current_date <- "25JUL25"  # or: toupper(format(Sys.Date(), "%d%b%y"))
+current_date <- "18Aug25"  # or: toupper(format(Sys.Date(), "%d%b%y"))
 
 # Source helpers created earlier
 source(file.path(script_dir, "Function_list.r"))
