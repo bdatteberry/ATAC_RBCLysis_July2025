@@ -19,9 +19,12 @@ suppressPackageStartupMessages({
 
 # ---- Config / Default root ---------------------------------------------------
 if (!exists("main_wd")) {
-  main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+  main_wd <- getOption(
+    "project.main_wd",
+    Sys.getenv("PROJECT_ROOT", "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis")
+  )
 }
-main_wd <- sub("/+$", "", main_wd)  # normalize trailing slash
+main_wd <- sub("/+$", "", main_wd)
 
 # ---- Date handling (LA "today" or override) ----------------------------------
 tz <- getOption("project.tz", "America/Los_Angeles")
