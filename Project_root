@@ -1,28 +1,50 @@
-# =============================================================================
-# 00_auto_paths.R   (manual, no guessing/extra dirs)
-# =============================================================================
-# This script sets a single project root for all downstream scripts.
-# It does NOT create extra subfolders like ATACseq_Nextflow on Desktop.
-# =============================================================================
+# --- 00_auto_paths.R (single source of truth; no extra dirs) ------------------
+# Root (use env var if set, else your Desktop path)
+main_wd <- Sys.getenv(
+  "PROJECT_ROOT",
+  "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+)
+main_wd <- sub("/+$", "", main_wd)
 
-# ---- Main project working directory ----
-main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+# Date handling: LA "today" or override via env var PROJECT_DATE (YYYY-MM-DD)
+tz <- getOption("project.tz", "America/Los_Angeles")
+override <- Sys.getenv("PROJECT_DATE", "")
+project_current_date <- function() {
+  d <- if (nzchar(override)) as.Date(override)
+       else as.Date(format(as.POSIXct(Sys.time(), tz = tz), "%Y-%m-%d"))
+  toupper(format(d, "%d%b%y"))
+}
+current_date <- project_current_date()
 
-# ---- Subdirectories (assume they exist inside main_wd) ----
-macs_wd        <- file.path(main_wd, "macs2")
-scale_wd       <- file.path(main_wd, "scaling")
-output_wd      <- file.path(main_wd, "output")
-pre_deseq_reps_wd <- file.path(main_wd, "pre_deseq_reps")
-scripts_wd     <- file.path(main_wd, "scripts")
+# Core dirs (match the rest of your pipeline)
+macs_wd  <- file.path(main_wd, "macs")     # not 'macs2'
+scale_wd <- file.path(main_wd, "scale")    # not 'scaling'
+deseq_wd <- file.path(main_wd, "R")        # container for dated runs
+output_wd <- file.path(deseq_wd, current_date)
 
-# ---- Make sure they exist ----
-dir.create(macs_wd, showWarnings = FALSE, recursive = TRUE)
-dir.create(scale_wd, showWarnings = FALSE, recursive = TRUE)
-dir.create(output_wd, showWarnings = FALSE, recursive = TRUE)
-dir.create(pre_deseq_reps_wd, showWarnings = FALSE, recursive = TRUE)
-dir.create(scripts_wd, showWarnings = FALSE, recursive = TRUE)
+# Downstream analysis dirs
+rep_overlap_wd    <- file.path(output_wd, "replicate_normalized")
+pre_deseq_reps_wd <- file.path(rep_overlap_wd, "pre_DESeq_counts")
+homer_wd          <- file.path(deseq_wd, "Homer", current_date)
+scripts_wd        <- file.path(main_wd, "scripts")
+seq_stats_wd      <- file.path(main_wd, "seq_stats")
 
-# ---- Set working directory to main ----
-setwd(main_wd)
+# Ensure they exist (idempotent)
+for (p in c(main_wd, macs_wd, scale_wd, deseq_wd, output_wd,
+            rep_overlap_wd, pre_deseq_reps_wd, homer_wd, scripts_wd, seq_stats_wd)) {
+  if (!dir.exists(p)) dir.create(p, recursive = TRUE)
+}
 
-message("Paths set. Project root = ", main_wd)
+# Helpers (lightweight; no side effects)
+create_dir <- function(path){ if(!dir.exists(path)) dir.create(path, recursive = TRUE); invisible(path) }
+stamp <- function(path, tag = current_date){
+  dirp <- dirname(path); base <- basename(path)
+  ext  <- tools::file_ext(base)
+  stem <- if (nzchar(ext)) tools::file_path_sans_ext(base) else base
+  if (nzchar(ext)) file.path(dirp, paste0(stem, "_", tag, ".", ext))
+  else             file.path(dirp, paste0(stem, "_", tag))
+}
+
+message("✔ PROJECT_ROOT: ", main_wd)
+message("✔ DATE TAG    : ", current_date)
+message("✔ output_wd   : ", output_wd)
