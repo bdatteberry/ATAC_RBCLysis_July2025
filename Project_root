@@ -1,0 +1,28 @@
+# =============================================================================
+# 00_auto_paths.R   (manual, no guessing/extra dirs)
+# =============================================================================
+# This script sets a single project root for all downstream scripts.
+# It does NOT create extra subfolders like ATACseq_Nextflow on Desktop.
+# =============================================================================
+
+# ---- Main project working directory ----
+main_wd <- "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis"
+
+# ---- Subdirectories (assume they exist inside main_wd) ----
+macs_wd        <- file.path(main_wd, "macs2")
+scale_wd       <- file.path(main_wd, "scaling")
+output_wd      <- file.path(main_wd, "output")
+pre_deseq_reps_wd <- file.path(main_wd, "pre_deseq_reps")
+scripts_wd     <- file.path(main_wd, "scripts")
+
+# ---- Make sure they exist ----
+dir.create(macs_wd, showWarnings = FALSE, recursive = TRUE)
+dir.create(scale_wd, showWarnings = FALSE, recursive = TRUE)
+dir.create(output_wd, showWarnings = FALSE, recursive = TRUE)
+dir.create(pre_deseq_reps_wd, showWarnings = FALSE, recursive = TRUE)
+dir.create(scripts_wd, showWarnings = FALSE, recursive = TRUE)
+
+# ---- Set working directory to main ----
+setwd(main_wd)
+
+message("Paths set. Project root = ", main_wd)
