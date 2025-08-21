@@ -36,7 +36,7 @@ options(project.scripts_wd = script_dir)
 # ---- Paths to upstream inputs (READ FROM ONLY) -------------------------------
 training_dir <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training"
 counts_candidates <- c(
-  file.path(training_dir, "consensus_peaks.mRp.clN.featureCounts_1.txt")
+  file.path(training_dir, "consensus_peaks.mRp.clN.featureCounts.txt")
 )
 # Also look under the project root in case counts live there
 counts_candidates <- c(
