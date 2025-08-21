@@ -30,7 +30,7 @@ COLDATA_FILE        <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_
 
 # ------------------------ Fallbacks if 01 wasn't sourced ----------------------
 if (!exists("current_date"))       current_date <- toupper(format(Sys.Date(), "%d%b%y"))
-if (!exists("num_overlaps_ratio")) num_overlaps_ratio <- 0.65
+if (!exists("num_overlaps_ratio")) num_overlaps_ratio <- 0.8
 
 if (!exists("filtered_counts_unsorted_file"))
   filtered_counts_unsorted_file <- paste0("all_consensus_peaks_nonsorted_with_overlap_filter_replicate_samples_", current_date, ".txt")
