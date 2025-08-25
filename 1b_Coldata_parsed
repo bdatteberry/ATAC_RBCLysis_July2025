@@ -1,0 +1,195 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+# 03_Make_Coldata_From_Paths.r
+# Build a new coldata that preserves RBC status, parses donor/time/condition,
+# and normalizes names for use by 02_Count_Processing.r
+#
+# Output: R/<DATE>/deseq_input_merged_samples_PARSED.csv
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readr)
+})
+
+# --------------------------- Load project paths -------------------------------
+scripts_wd <- file.path(
+  "/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis","scripts"
+)
+source(file.path(scripts_wd, "00_auto_paths.R"))  # defines output_wd/current_date/etc.
+
+# --------------------------- Inputs & outputs ---------------------------------
+training_dir <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training"
+merged_today <- file.path(output_wd, "deseq_input_merged_samples.csv")
+input_coldata <- if (file.exists(merged_today)) merged_today else
+  file.path(training_dir, "coldata_for_DESeq2.csv")
+
+if (!file.exists(input_coldata)) {
+  stop("Could not find a coldata CSV at either:\n - ", merged_today, "\n - ",
+       file.path(training_dir, "coldata_for_DESeq2.csv"))
+}
+
+out_file <- file.path(output_wd, "deseq_input_merged_samples_PARSED.csv")
+message("Reading: ", input_coldata)
+
+# ----------------------------- Helpers ----------------------------------------
+
+# RBC detector (for status only; canonicalization happens in normalize_unit)
+detect_rbc <- function(x){
+  s <- tolower(basename(as.character(x)))
+  if (grepl("(norbclysis|rbcnull|\\bnull\\b)", s)) return("RBCNULL")  # no lysis
+  if (grepl("(wrbclysis|rbclysis)", s))          return("RBCLYSIS")   # with lysis
+  "RBCLYSIS"  # blank token = with lysis
+}
+
+# Normalize a unit string to match boolean/counts columns
+# Rule: with RBC lysis => NO suffix; no RBC lysis => add "_RBCNULL"
+normalize_unit <- function(x) {
+  v <- as.character(x)
+  v <- basename(v)
+  v <- sub("\\.[^.]+\\.clN\\.sorted\\.bam$", "", v)
+  v <- sub("\\.clN\\.bool$",                "", v)
+  v <- gsub("[^A-Za-z0-9]+","_", v)
+
+  # drop mRp/mLb tags
+  v <- gsub("(^|_)mRp(_|$)", "_", v, ignore.case = TRUE)
+  v <- gsub("(^|_)mLb(_|$)", "_", v, ignore.case = TRUE)
+
+  # unify condition names
+  v <- gsub("TNFalpha", "TNFa", v, ignore.case = TRUE)
+  v <- gsub("TNF\u03b1", "TNFa", v, fixed = TRUE)
+
+  # harmonize RBC: map "no lysis" tokens to _RBCNULL; drop explicit *lysis* tokens
+  v <- gsub("(?i)(^|_)(noRBClysis|RBCNULL|RBCnull|Null)(?=(_|$))", "_RBCNULL", v, perl = TRUE)
+  v <- gsub("(?i)(^|_)(w?RBClysis)(?=(_|$))", "_", v, perl = TRUE)
+
+  # remove replicate/time/seq tokens
+  v <- gsub("_REP[0-9]+(?=(_|$))", "", v, perl = TRUE)
+  v <- gsub("_T[0-9]+(?=(_|$))",   "", v, perl = TRUE)
+  v <- gsub("_seq[0-9]+(?=(_|$))", "", v, perl = TRUE)
+
+  # clean up underscores
+  v <- gsub("_+","_", v)
+  v <- sub("^_|_$","", v)
+  v
+}
+
+# Parse names like: its/101096_T0_UT_1_noRBClysis_1_S19_R2_
+# donor : take first all-digits token and drop leading "1010" (101096 -> 96)
+# time  : first T<digits> if present, else "T120"
+# cond  : token immediately after timepoint, else first alpha token; UT -> "untreated"; TNFalpha/TNFα -> "TNFa"
+# RBC   : contains (noRBClysis|RBCNULL|RBCnull|Null) => RBCNULL; else RBCLYSIS
+parse_seq_name_vec <- function(s) {
+  s <- as.character(s)
+  b <- basename(s)
+  toks_list <- strsplit(b, "_", fixed = TRUE)
+
+  get_first_numeric <- function(toks) {
+    hit <- toks[grepl("^[0-9]+$", toks)]
+    if (length(hit)) sub("^1010", "", hit[1]) else NA_character_
+  }
+  get_time <- function(toks) {
+    hit <- toks[grepl("^T[0-9]+$", toks)]
+    if (length(hit)) hit[1] else "T120"
+  }
+  get_cond <- function(toks) {
+    tpos <- which(grepl("^T[0-9]+$", toks))
+    cand <- NA_character_
+    if (length(tpos)) {
+      pos <- tpos[1] + 1
+      if (pos <= length(toks)) cand <- toks[pos]
+    }
+    if (is.na(cand)) {
+      hit <- toks[grepl("^[A-Za-z]+$", toks)]
+      cand <- if (length(hit)) hit[1] else ""
+    }
+    cand <- gsub("^UT$", "untreated", cand, ignore.case = TRUE)
+    cand <- gsub("TNFalpha", "TNFa", cand, ignore.case = TRUE)
+    cand <- gsub("TNF\u03b1", "TNFa", cand, fixed = TRUE)
+    cand
+  }
+  get_rbc <- function(toks) {
+    if (any(grepl("(noRBClysis|RBCNULL|RBCnull|\\bNull\\b)", toks, ignore.case = TRUE))) "RBCNULL" else "RBCLYSIS"
+  }
+
+  donor     <- vapply(toks_list, get_first_numeric, character(1))
+  timepoint <- vapply(toks_list, get_time,         character(1))
+  cond      <- vapply(toks_list, get_cond,         character(1))
+  rbc       <- vapply(toks_list, get_rbc,          character(1))
+
+  # Construct unit: donor_condition + optional _RBCNULL suffix; then normalize
+  base <- paste0(donor, "_", cond, ifelse(rbc == "RBCNULL", "_RBCNULL", ""))
+  unit_guess <- normalize_unit(base)
+
+  tibble(
+    donor          = donor,
+    timepoint      = timepoint,
+    condition_core = cond,
+    rbc            = rbc,
+    unit_guess     = unit_guess
+  )
+}
+
+# ------------------------------- Build table ----------------------------------
+cd_raw <- read.csv(input_coldata, check.names = FALSE)
+
+# Find the "sample-like" column without tidy-eval headaches
+samp_candidates <- c("sample","samples","nextflow_replicate_ID",
+                     "nextflow_sample_ID","replicate","Run_ID")
+samp_hit <- samp_candidates[samp_candidates %in% names(cd_raw)][1]
+if (is.na(samp_hit)) {
+  stop("No sample-like column in coldata (looked for: ",
+       paste(samp_candidates, collapse=", "), "). Columns found: ",
+       paste(names(cd_raw), collapse=", "))
+}
+
+# Create a stable 'sample_raw' while keeping the original column
+coldata <- cd_raw
+coldata$sample_raw <- coldata[[samp_hit]]
+
+# Normalized sample (rep/time removed; RBC kept), and a working unit
+coldata$sample_norm <- normalize_unit(coldata$sample_raw)
+coldata$unit        <- coldata$sample_norm
+
+# Derive donor/time/cond/rbc from raw name (vectorized)
+derived <- parse_seq_name_vec(coldata$sample_raw)
+stopifnot(nrow(derived) == nrow(coldata))
+coldata <- bind_cols(coldata, derived)
+
+# Prefer any existing condition column if you have one; otherwise use parsed core
+cond_from_col <- if ("condition" %in% names(coldata)) coldata$condition else NA_character_
+cond_from_col <- ifelse(is.na(cond_from_col) | cond_from_col == "", NA, cond_from_col)
+cond_from_col <- gsub("TNFalpha", "TNFa", cond_from_col, ignore.case = TRUE)
+cond_from_col <- gsub("TNF\u03b1", "TNFa", cond_from_col, fixed = TRUE)
+cond_from_col <- gsub("^UT$", "untreated", cond_from_col, ignore.case = TRUE)
+
+coldata$condition_core <- dplyr::coalesce(cond_from_col, coldata$condition_core)
+
+# Final unit: use parsed unit_guess (matches boolean/count headers best)
+coldata$unit   <- dplyr::coalesce(coldata$unit_guess, coldata$unit)
+coldata$sample <- coldata$sample_norm
+
+# Condition label for DESeq design/grouping (RBC kept separate via 'rbc' column)
+# Keep this *RBC-free* to avoid duplication later in 02 (which re-attaches RBC)
+coldata$condition_label <- coldata$condition_core
+
+# Tidy columns: put new fields first, then all original (excluding duplicated names)
+keep_new  <- c("sample", "unit", "donor", "timepoint", "condition_core", "rbc", "condition_label")
+orig_cols <- setdiff(names(cd_raw), c("sample","samples"))
+coldata_out <- coldata %>%
+  select(any_of(keep_new), any_of(orig_cols)) %>%
+  distinct()
+
+# ------------------------------- Write ----------------------------------------
+dir.create(output_wd, showWarnings = FALSE, recursive = TRUE)
+write.csv(coldata_out, out_file, row.names = FALSE)
+message("✅ Wrote parsed coldata: ", out_file)
+
+# Optional: quick summary
+message(
+  "Rows: ", nrow(coldata_out),
+  " | donors: ", length(unique(na.omit(coldata_out$donor))),
+  " | units: ", length(unique(coldata_out$unit)),
+  " | conditions (core): ", length(unique(coldata_out$condition_core)),
+  " | RBC statuses: ", paste(names(table(coldata_out$rbc)), table(coldata_out$rbc), collapse="; ")
+)
