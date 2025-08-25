@@ -1,0 +1,366 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+# 02_Count_Processing.r  — RBC harmonized (Null vs with RBC), filtered & unfiltered
+# =============================================================================
+# Canonical rule:
+#   WITH RBC lysis  -> no suffix (e.g., "96_PMA")
+#   NO  RBC lysis   -> suffix "_RBCNULL" (e.g., "96_PMA_RBCNULL")
+# Synonyms handled:
+#   no-lysis:  Null | noRBClysis | RBCNULL | RBCnull
+#   with-lysis: wRBClysis | RBClysis | (no token / blank)
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(UpSetR)
+})
+
+# --------------------------- Paths & settings ---------------------------------
+scripts_wd <- file.path("/Users/brandiatteberry/Desktop/Bioinformatics/ATACseq_Analysis","scripts")
+source(file.path(scripts_wd, "00_auto_paths.R"))  # defines output_wd, pre_deseq_reps_wd, current_date
+
+training_dir <- "/Users/brandiatteberry/Desktop/Bioinformatics/RBC_Lysis_Bioinformatics_training"
+FEATURE_COUNTS_FILE <- file.path(training_dir, "consensus_peaks.mRp.clN.featureCounts.txt")
+BOOLEAN_FILE        <- file.path(training_dir, "consensus_peaks.mRp.clN.boolean.txt")
+# BOOLEAN_FILE     <- file.path(training_dir, "consensus_peaks.mLb.clN.boolean.txt")
+
+COLDATA_FILE <- file.path(output_wd, "deseq_input_merged_samples_PARSED.csv")
+if (!file.exists(COLDATA_FILE)) stop("Missing parsed coldata: ", COLDATA_FILE, " (run 03 first)")
+
+if (!exists("current_date"))       current_date <- toupper(format(Sys.Date(), "%d%b%y"))
+if (!exists("num_overlaps_ratio")) num_overlaps_ratio <- 0.65  # consensus threshold
+
+# Output files
+filtered_counts_unsorted_file <- paste0("all_consensus_peaks_nonsorted_with_overlap_filter_replicate_samples_", current_date, ".txt")
+filtered_counts_file          <- paste0("all_consensus_peaks_sorted_with_overlap_filter_replicate_samples_",  current_date, ".txt")
+
+create_dir <- function(p){ if(!dir.exists(p)) dir.create(p, TRUE); invisible(p) }
+create_dir(pre_deseq_reps_wd)
+diag_dir <- file.path(pre_deseq_reps_wd, "diagnostics"); create_dir(diag_dir)
+
+# --------------------------- RBC helpers --------------------------------------
+detect_rbc <- function(x){
+  s <- tolower(basename(as.character(x)))
+  if (grepl("(norbclysis|rbcnull|\\bnull\\b)", s)) return("RBCNULL")
+  if (grepl("(wrbclysis|rbclysis)", s))          return("RBCLYSIS")
+  return("RBCLYSIS")  # blank means with lysis
+}
+
+normalize_unit <- function(x) {
+  v <- as.character(x)
+  v <- basename(v)
+  v <- sub("\\.[^.]+\\.clN\\.sorted\\.bam$", "", v)
+  v <- sub("\\.clN\\.bool$",                "", v)
+  v <- gsub("[^A-Za-z0-9]+","_", v)
+
+  # drop mRp/mLb tags
+  v <- gsub("(^|_)mRp(_|$)", "_", v, ignore.case = TRUE)
+  v <- gsub("(^|_)mLb(_|$)", "_", v, ignore.case = TRUE)
+
+  # condition normalization
+  v <- gsub("TNFalpha", "TNFa", v, ignore.case = TRUE)
+  v <- gsub("TNF\u03b1", "TNFa", v, fixed = TRUE)
+
+  # RBC harmonization: no-lysis -> _RBCNULL ; with-lysis tokens -> drop
+  v <- gsub("(?i)(^|_)(noRBClysis|RBCNULL|RBCnull|Null)(?=(_|$))", "_RBCNULL", v, perl = TRUE)
+  v <- gsub("(?i)(^|_)(w?RBClysis)(?=(_|$))", "_", v, perl = TRUE)
+
+  # remove replicate/time/seq tokens
+  v <- gsub("_REP[0-9]+(?=(_|$))", "", v, perl = TRUE)
+  v <- gsub("_T[0-9]+(?=(_|$))",   "", v, perl = TRUE)
+  v <- gsub("_seq[0-9]+(?=(_|$))", "", v, perl = TRUE)
+
+  v <- gsub("_+","_", v)
+  v <- sub("^_|_$","", v)
+  v
+}
+
+normalize_condition_label <- function(x){
+  v <- as.character(x)
+  v <- gsub("TNFalpha", "TNFa", v, ignore.case = TRUE)
+  v <- gsub("TNF\u03b1", "TNFa", v, fixed = TRUE)
+  v <- gsub("[^A-Za-z0-9]+","_", v)
+  v <- gsub("(?i)(^|_)(noRBClysis|RBCNULL|RBCnull|Null)(?=(_|$))", "_RBCNULL", v, perl = TRUE)
+  v <- gsub("(?i)(^|_)(w?RBClysis)(?=(_|$))", "_", v, perl = TRUE)
+  v <- gsub("_+","_", v)
+  v <- sub("^_|_$","", v)
+  v
+}
+
+trim_bam  <- function(x) sub("\\.[^.]+\\.clN\\.sorted\\.bam$", "", basename(x))
+trim_bool <- function(x) sub("\\.clN\\.bool$",                    "", basename(x))
+
+# ----------------------- featureCounts ----------------------------------------
+if (!file.exists(FEATURE_COUNTS_FILE)) stop("Missing featureCounts: ", FEATURE_COUNTS_FILE)
+fc <- read.table(FEATURE_COUNTS_FILE, header = TRUE, sep = "\t",
+                 check.names = FALSE, comment.char = "#")
+stopifnot(ncol(fc) > 7)
+
+data_a <- fc[, 1:6]
+names(data_a)[1:6] <- c("Geneid","chr","start","end","Strand","Length")
+
+data_b <- fc[, 7:ncol(fc), drop = FALSE]
+colnames(data_b) <- trim_bam(colnames(data_b))
+rownames(data_b) <- data_a$Geneid
+
+data_b_export <- tibble(Interval = data_a$Geneid) %>%
+  bind_cols(as_tibble(data_b, .name_repair = "minimal"))
+data_b_df <- left_join(data_b_export, data_a, by = c("Interval" = "Geneid"))
+
+counts_cols_raw    <- setdiff(names(data_b_df), c("Interval","chr","start","end","Strand","Length"))
+counts_units_norm  <- normalize_unit(counts_cols_raw)
+counts_rbc         <- vapply(counts_cols_raw, detect_rbc, character(1))
+counts_map         <- tibble(rep_col = counts_cols_raw,
+                             unit_norm = counts_units_norm,
+                             rbc = counts_rbc)
+
+# ----------------------------- boolean ----------------------------------------
+if (!file.exists(BOOLEAN_FILE)) stop("Missing boolean: ", BOOLEAN_FILE)
+boolean_raw <- read.table(BOOLEAN_FILE, header = TRUE, sep = "\t",
+                          check.names = FALSE, as.is = TRUE)
+
+nm_low <- tolower(names(boolean_raw))
+grab   <- function(key) names(boolean_raw)[which(nm_low == key)][1]
+if ("interval" %in% nm_low) {
+  iv <- grab("interval");    boolean_raw$Interval <- as.character(boolean_raw[[iv]])
+} else if ("interval_id" %in% nm_low) {
+  iv <- grab("interval_id"); boolean_raw$Interval <- as.character(boolean_raw[[iv]])
+} else if (all(c("chr","start","end") %in% nm_low)) {
+  ch <- grab("chr"); st <- grab("start"); en <- grab("end")
+  boolean_raw$Interval <- paste(boolean_raw[[ch]], boolean_raw[[st]], boolean_raw[[en]], sep=":")
+} else stop("Boolean file lacks Interval/interval_id or chr/start/end.")
+
+bool_cols_raw <- grep("\\.bool$", names(boolean_raw), value = TRUE)
+if (!length(bool_cols_raw)) stop("No *.bool columns found in ", BOOLEAN_FILE)
+
+boolean_treated <- boolean_raw %>%
+  select(Interval, all_of(bool_cols_raw)) %>%
+  mutate(across(-Interval, ~ as.integer(.)))
+names(boolean_treated)[-1] <- trim_bool(names(boolean_treated)[-1])
+
+bool_names_raw   <- names(boolean_treated)[-1]
+bool_units_norm  <- normalize_unit(bool_names_raw)
+bool_rbc         <- vapply(bool_names_raw, detect_rbc, character(1))
+
+# collapse to unit-level by OR across replicate/seq columns of the same unit
+units <- unique(bool_units_norm)
+boolean_unit_df <- tibble(Interval = boolean_treated$Interval)
+for (u in units) {
+  ix <- which(bool_units_norm == u)
+  vals <- as.integer(rowSums(as.matrix(boolean_treated[, ix + 1, drop = FALSE]), na.rm = TRUE) > 0)
+  boolean_unit_df[[u]] <- vals
+}
+
+# ------------------------------- coldata --------------------------------------
+cd <- read.csv(COLDATA_FILE, check.names = FALSE)
+if (!("unit" %in% names(cd))) stop("Parsed coldata must contain a 'unit' column.")
+cond_col <- if ("condition_label" %in% names(cd)) "condition_label" else {
+  alt <- c("condition","Comp_A","Comp_B","Condition","group","Group")
+  hit <- alt[alt %in% names(cd)]; if (!length(hit)) stop("Need a condition column in coldata.")
+  hit[1]
+}
+
+cd$unit_norm <- normalize_unit(cd$unit)
+cd$rbc       <- vapply(cd$unit, detect_rbc, character(1))
+cd$cond_norm <- normalize_condition_label(cd[[cond_col]])
+cd$cond_group <- if ("timepoint" %in% names(cd)) {
+  paste0(cd$timepoint, "_", cd$cond_norm, ifelse(cd$rbc == "RBCNULL", "_RBCNULL", ""))
+} else {
+  paste0(cd$cond_norm,        ifelse(cd$rbc == "RBCNULL", "_RBCNULL", ""))
+}
+
+present_units <- intersect(unique(cd$unit_norm), colnames(boolean_unit_df)[-1])
+if (!length(present_units)) {
+  stop(paste0(
+    "No overlap after normalization.\n",
+    "Coldata example: ", paste(head(unique(cd$unit_norm), 8), collapse=", "), "\n",
+    "Boolean example: ", paste(head(colnames(boolean_unit_df)[-1], 8), collapse=", ")
+  ))
+}
+
+coldata_filt <- cd %>%
+  filter(unit_norm %in% present_units) %>%
+  select(unit_norm, cond_group, rbc) %>%
+  distinct()
+
+# ----------------------------- Diagnostics ------------------------------------
+write.table(tibble(boolean_cols_raw = bool_names_raw,
+                   boolean_cols_norm = bool_units_norm,
+                   rbc = bool_rbc),
+            file.path(diag_dir, paste0("boolean_columns_", current_date, ".txt")),
+            row.names = FALSE, quote = FALSE, sep = "\t")
+
+write.table(tibble(count_cols_raw = counts_cols_raw,
+                   count_unit_norm = counts_units_norm,
+                   rbc = counts_rbc),
+            file.path(diag_dir, paste0("counts_columns_", current_date, ".txt")),
+            row.names = FALSE, quote = FALSE, sep = "\t")
+
+write.table(coldata_filt,
+            file.path(diag_dir, paste0("coldata_used_", current_date, ".txt")),
+            row.names = FALSE, quote = FALSE, sep = "\t")
+
+message("Boolean units (n): ", ncol(boolean_unit_df) - 1)
+message("Coldata  rows (n): ", nrow(coldata_filt))
+message("Matched  units (n): ", length(unique(coldata_filt$unit_norm)))
+
+# Sanity: show how many units per cond are RBCNULL vs RBCLYSIS
+rbc_summary <- coldata_filt %>%
+  mutate(rbc_label = ifelse(rbc=="RBCNULL", "_RBCNULL", "")) %>%
+  count(cond_group, rbc_label, name = "n_units") %>%
+  arrange(cond_group, rbc_label)
+write.table(rbc_summary,
+            file.path(diag_dir, paste0("rbc_units_per_condition_", current_date, ".txt")),
+            row.names = FALSE, quote = FALSE, sep = "\t")
+
+# ----------------------- Build per-condition sets -----------------------------
+conds <- sort(unique(coldata_filt$cond_group))
+if (!length(conds)) stop("No condition groups found after filtering.")
+
+unfiltered_sets <- vector("list", length(conds))
+filtered_sets   <- vector("list", length(conds))
+names(unfiltered_sets) <- conds
+names(filtered_sets)   <- conds
+
+for (cond in conds) {
+  cond_units <- unique(coldata_filt$unit_norm[coldata_filt$cond_group == cond])
+  if (!length(cond_units)) next
+  mat <- boolean_unit_df %>% select(Interval, all_of(cond_units))
+
+  # ANY overlap (unfiltered)
+  any_keep <- mat %>%
+    mutate(sums = rowSums(across(-Interval))) %>%
+    filter(sums >= 1L) %>%
+    pull(Interval)
+  unfiltered_sets[[cond]] <- unique(any_keep)
+
+  # Consensus (filtered)
+  thr <- ceiling(num_overlaps_ratio * length(cond_units))
+  filt_keep <- mat %>%
+    mutate(sums = rowSums(across(-Interval))) %>%
+    filter(sums >= thr) %>%
+    pull(Interval)
+  filtered_sets[[cond]] <- unique(filt_keep)
+
+  message(format(Sys.time(), "%Y-%m-%d %H:%M:%S"), " ", cond,
+          " | units=", length(cond_units),
+          " | unfiltered=", length(unfiltered_sets[[cond]]),
+          " | filtered=", length(filtered_sets[[cond]]), " (thr=", thr, ")")
+}
+
+counts_df <- tibble(
+  condition    = conds,
+  n_unfiltered = vapply(unfiltered_sets, length, integer(1)),
+  n_filtered   = vapply(filtered_sets,   length, integer(1))
+)
+write.table(counts_df,
+            file.path(diag_dir, paste0("per_condition_counts_", current_date, ".txt")),
+            row.names = FALSE, quote = FALSE, sep = "\t")
+
+# --------------------- Build filtered replicate matrix & write -----------------
+setwd(pre_deseq_reps_wd)
+
+# Always write the unsorted matrix
+write.table(
+  data_b_df, file = filtered_counts_unsorted_file,
+  sep = "\t", quote = FALSE, row.names = FALSE
+)
+
+iv_union_filtered <- unique(unlist(filtered_sets))
+if (!length(iv_union_filtered)) {
+  stop("Filtered union is empty — if you expect differences, check the diagnostics in diagnostics/.")
+}
+
+rep_cols_to_keep <- counts_map %>%
+  filter(unit_norm %in% unique(coldata_filt$unit_norm)) %>%
+  pull(rep_col) %>%
+  unique()
+
+consensus_peaks_filtered <- data_b_df %>%
+  filter(Interval %in% iv_union_filtered) %>%
+  select(Interval, all_of(rep_cols_to_keep), chr, start, end)
+
+write.table(
+  consensus_peaks_filtered,
+  file = filtered_counts_file,
+  sep = "\t", quote = FALSE, row.names = FALSE
+)
+
+message(Sys.time(), " Wrote:\n - ", file.path(pre_deseq_reps_wd, filtered_counts_unsorted_file),
+        "\n - ", file.path(pre_deseq_reps_wd, filtered_counts_file))
+
+# ----------------------------------- Plots ------------------------------------
+if (!exists("my_ggplot_theme")) {
+  my_ggplot_theme <- theme_classic() +
+    theme(text = element_text(color = "black"),
+          plot.title = element_text(hjust = 0.5, size = rel(1.5)))
+}
+
+# Unfiltered bars
+df_unf <- counts_df %>% filter(n_unfiltered > 0)
+if (nrow(df_unf) > 0) {
+  p_unf <- ggplot(df_unf, aes(x = condition, y = n_unfiltered)) +
+    geom_col() +
+    geom_text(aes(label = n_unfiltered), vjust = -0.5, size = 3) +
+    labs(x = "Condition",
+         y = "Number of Overlapping Peaks (ANY unit)",
+         title = "Overlap Peak Counts per Condition — Unfiltered (Union)") +
+    my_ggplot_theme +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(paste0("peaks_per_condition_unfiltered_", current_date, ".png"),
+         plot = p_unf, width = 8, height = 8, dpi = 500)
+}
+
+# Filtered bars
+df_fil <- counts_df %>% filter(n_filtered > 0)
+if (nrow(df_fil) > 0) {
+  p_fil <- ggplot(df_fil, aes(x = condition, y = n_filtered)) +
+    geom_col() +
+    geom_text(aes(label = n_filtered), vjust = -0.5, size = 3) +
+    labs(x = "Condition",
+         y = paste0("Number of Overlapping Peaks (≥ ", num_overlaps_ratio*100, "% units)"),
+         title = "Overlap Peak Counts per Condition — Filtered (Consensus)") +
+    my_ggplot_theme +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(paste0("peaks_per_condition_filtered_", current_date, ".png"),
+         plot = p_fil, width = 8, height = 8, dpi = 500)
+}
+
+# UpSetR plots (need ≥ 2 sets)
+non_empty_unf <- Filter(function(v) length(v) > 0, unfiltered_sets)
+if (length(non_empty_unf) >= 2) {
+  png(paste0("upsetR_condition_overlaps_unfiltered_", current_date, ".png"),
+      width = 1800, height = 1000, res = 120)
+  upset(
+    data           = fromList(non_empty_unf),
+    sets           = names(non_empty_unf),
+    keep.order     = TRUE,
+    nsets          = length(non_empty_unf),
+    order.by       = "freq",
+    main.bar.color = "grey",
+    matrix.color   = "#7E2945",
+    text.scale     = 1.25,
+    mb.ratio       = c(0.7, 0.3)
+  )
+  dev.off()
+} else message("UpSetR (unfiltered) skipped (needs ≥2 non-empty sets).")
+
+non_empty_fil <- Filter(function(v) length(v) > 0, filtered_sets)
+if (length(non_empty_fil) >= 2) {
+  png(paste0("upsetR_condition_overlaps_filtered_", current_date, ".png"),
+      width = 1800, height = 1000, res = 120)
+  upset(
+    data           = fromList(non_empty_fil),
+    sets           = names(non_empty_fil),
+    keep.order     = TRUE,
+    nsets          = length(non_empty_fil),
+    order.by       = "freq",
+    main.bar.color = "grey",
+    matrix.color   = "#7E2945",
+    text.scale     = 1.25,
+    mb.ratio       = c(0.7, 0.3)
+  )
+  dev.off()
+} else message("UpSetR (filtered) skipped (needs ≥2 non-empty sets).")
+
+message(Sys.time(), " ✅ Finished 02_Count_Processing.r")
