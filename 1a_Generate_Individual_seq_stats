@@ -9,6 +9,7 @@ suppressPackageStartupMessages({
   library(tidyr); library(purrr); library(janitor); library(tibble)
 })
 
+options(project.tz = "America/Los_Angeles")
 cat0 <- function(...) cat(paste0(..., collapse=""), "\n")
 
 # ---------- 1) Load canonical paths from scripts/00_auto_paths.R --------------
@@ -22,7 +23,8 @@ txt <- readLines(auto_paths, warn = FALSE)
 txt <- gsub("[\u201C\u201D]", "\"", txt)
 tf  <- tempfile(fileext = ".R"); writeLines(txt, tf)
 
-env <- new.env(parent = emptyenv())
+# IMPORTANT: use a sane parent so base primitives (<-) are visible
+env <- new.env(parent = baseenv())  # or parent = globalenv()
 sys.source(tf, envir = env)
 
 # If output_wd wasn't defined for some reason, fall back safely
@@ -57,11 +59,11 @@ QC_THRESHOLDS <- list(
 safe_read <- function(path){
   if(!file.exists(path)) { message("⚠️ Missing: ", path); return(NULL) }
   ext <- tolower(tools::file_ext(path))
-  df <- if (ext == "csv") read_csv(path, show_col_types = FALSE) else {
-    tmp <- tryCatch(read_tsv(path, show_col_types = FALSE), error = function(e) NULL)
-    if (is.null(tmp) || ncol(tmp) == 1) read_csv(path, show_col_types = FALSE) else tmp
+  df <- if (ext == "csv") readr::read_csv(path, show_col_types = FALSE) else {
+    tmp <- tryCatch(readr::read_tsv(path, show_col_types = FALSE), error = function(e) NULL)
+    if (is.null(tmp) || ncol(tmp) == 1) readr::read_csv(path, show_col_types = FALSE) else tmp
   }
-  clean_names(df)
+  janitor::clean_names(df)
 }
 
 normalize_id <- function(x){
@@ -81,9 +83,9 @@ ensure_sample <- function(df, prefer=c(
   if (!("sample" %in% names(df))){
     hit <- intersect(prefer, names(df)); if (!length(hit)) stop("No sample-like key found.")
     key <- hit[1]
-    df <- df %>% mutate(sample = if (grepl("^fastq", key)) basename(.data[[key]]) else .data[[key]])
+    df <- df %>% dplyr::mutate(sample = if (grepl("^fastq", key)) basename(.data[[key]]) else .data[[key]])
   }
-  df %>% mutate(sample = normalize_id(sample))
+  df %>% dplyr::mutate(sample = normalize_id(sample))
 }
 
 rename_first_match <- function(df, target, patterns){
@@ -144,14 +146,14 @@ cat0("Reading inputs…")
 
 sheet <- safe_read(f_sheet) %>%
   ensure_sample() %>%
-  mutate(sample_join = make_join_key(sample))
+  dplyr::mutate(sample_join = make_join_key(sample))
 
 align <- safe_read(f_align) %>%
   ensure_sample() %>%
   rename_first_match("mapped", c("^mapped$","mapped[_ ]?reads","reads[_ ]?mapped")) %>%
-  select(any_of(c("sample","mapped"))) %>%
-  distinct() %>%
-  mutate(sample_join = make_join_key(sample))
+  dplyr::select(any_of(c("sample","mapped"))) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(sample_join = make_join_key(sample))
 
 stats <- safe_read(f_stats) %>%
   ensure_sample() %>%
@@ -159,9 +161,9 @@ stats <- safe_read(f_stats) %>%
   rename_first_match("average_frag_length", c("^average_length$","avg|frag")) %>%
   rename_first_match("reads_mapped_percent", c("^reads_mapped_percent$","percent[_ ]?mapped|mapped[_ ]?percent")) %>%
   rename_first_match("dup_perc", c("^reads_duplicated_percent$","duplicate.*%|dup")) %>%
-  select(any_of(c("sample","raw_total_sequences","average_frag_length","reads_mapped_percent","dup_perc"))) %>%
-  distinct() %>%
-  mutate(sample_join = make_join_key(sample))
+  dplyr::select(any_of(c("sample","raw_total_sequences","average_frag_length","reads_mapped_percent","dup_perc"))) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(sample_join = make_join_key(sample))
 
 # chrM %
 idx_raw <- safe_read(f_idxnorm) %>% ensure_sample()
@@ -184,7 +186,7 @@ frip_raw <- safe_read(f_frip) %>% ensure_sample()
 frip <- {
   if (!is.null(frip_raw) && nrow(frip_raw) > 0) {
     avail <- names(frip_raw)
-    want  <- make_clean_names(frip_raw$sample)
+    want  <- janitor::make_clean_names(frip_raw$sample)
     alt   <- ifelse(startsWith(want,"x"), substring(want,2), paste0("x", want))
     pick_col <- function(w){
       j <- which(want==w)
@@ -206,21 +208,26 @@ frip <- {
   } else tibble(sample=character(0), FRiP=numeric(0), sample_join=character(0))
 }
 
-# Peak annotation + total peaks
+# Peak annotation + total peaks (use rename_with + any_of to avoid tidyselect errors)
 peak <- safe_read(f_peak) %>% ensure_sample()
 peak <- {
   if (!is.null(peak)) {
     peak %>%
-      rename(Intergenic = any_of("intergenic"),
-             TTS        = any_of("tts"),
-             Unassigned = any_of("unassigned"),
-             exon       = any_of("exon"),
-             intron     = any_of("intron"),
-             `promoter.TSS` = any_of("promoter_tss")) %>%
-      mutate(peaks = rowSums(across(any_of(c("Intergenic","TTS","Unassigned","exon","intron","promoter.TSS")),
-                                    ~ to_num(.)), na.rm=TRUE)) %>%
-      select(sample, Intergenic, TTS, Unassigned, exon, intron, `promoter.TSS`, peaks) %>%
-      mutate(sample_join = make_join_key(sample))
+      dplyr::rename_with(~"Intergenic",    .cols = any_of("intergenic")) %>%
+      dplyr::rename_with(~"TTS",           .cols = any_of("tts")) %>%
+      dplyr::rename_with(~"Unassigned",    .cols = any_of("unassigned")) %>%
+      dplyr::rename_with(~"exon",          .cols = any_of("exon")) %>%
+      dplyr::rename_with(~"intron",        .cols = any_of("intron")) %>%
+      dplyr::rename_with(~"promoter.TSS",  .cols = any_of("promoter_tss")) %>%
+      dplyr::mutate(
+        peaks = rowSums(
+          dplyr::across(any_of(c("Intergenic","TTS","Unassigned","exon","intron","promoter.TSS")),
+                        ~ to_num(.)),
+          na.rm = TRUE
+        )
+      ) %>%
+      dplyr::select(sample, Intergenic, TTS, Unassigned, exon, intron, `promoter.TSS`, peaks) %>%
+      dplyr::mutate(sample_join = make_join_key(sample))
   } else {
     tibble(sample=character(0), Intergenic=integer(0), TTS=integer(0), Unassigned=integer(0),
            exon=integer(0), intron=integer(0), `promoter.TSS`=integer(0), peaks=integer(0),
@@ -230,16 +237,18 @@ peak <- {
 
 # ---------- 6) Merge & metrics ------------------------------------------------
 cat0("Merging…")
-merged <- list(sheet, stats, align, frip, peak, idxnorm) %>%
-  reduce(function(x, y) {
+merged <- purrr::reduce(
+  list(sheet, stats, align, frip, peak, idxnorm),
+  function(x, y) {
     if (is.null(x)) return(y)
     if (is.null(y)) return(x)
-    left_join(x, y, by = "sample_join")
-  })
+    dplyr::left_join(x, y, by = "sample_join")
+  }
+)
 if (is.null(merged)) stop("No inputs read successfully; nothing to merge.")
 
 merged <- merged %>%
-  mutate(
+  dplyr::mutate(
     mapped               = to_num(mapped),
     raw_total_sequences  = to_num(raw_total_sequences),
     dup_perc             = to_num(dup_perc),
@@ -255,9 +264,9 @@ merged <- merged %>%
     `promoter.TSS`       = to_num(`promoter.TSS`),
     peaks                = to_num(peaks)
   ) %>%
-  mutate(
+  dplyr::mutate(
     mapped_reads_M = ifelse(!is.na(mapped), mapped/1e6, NA_real_),
-    dup_frac = case_when(
+    dup_frac = dplyr::case_when(
       is.na(dup_perc)               ~ NA_real_,
       dup_perc <= 1                 ~ dup_perc,
       dup_perc > 1 & dup_perc <=100 ~ dup_perc/100,
@@ -275,16 +284,16 @@ merged <- merged %>%
 # ---------- 7) QC flags -------------------------------------------------------
 th <- QC_THRESHOLDS
 merged <- merged %>%
-  mutate(
+  dplyr::mutate(
     mapped_reads_M_fail = ifelse(is.na(mapped_reads_M), NA_integer_, as.integer(mapped_reads_M < th$min_mapped_reads_M)),
     peaks_fail          = ifelse(is.na(peaks),          NA_integer_, as.integer(peaks < th$min_peaks)),
     FRiP_fail           = ifelse(is.na(FRiP),           NA_integer_, as.integer(FRiP < th$min_frip_perc)),
     chrM_perc_fail      = ifelse(is.na(chrM_perc),      NA_integer_, as.integer(chrM_perc > th$max_chrM_perc)),
     dup_perc_fail       = ifelse(is.na(dup_perc),       NA_integer_, as.integer(dup_perc > th$max_dup_perc)),
-    total_score         = rowSums(across(c(mapped_reads_M_fail, peaks_fail, FRiP_fail, chrM_perc_fail, dup_perc_fail)), na.rm = TRUE),
-    remove_or_flag      = case_when(
-      coalesce(mapped_reads_M_fail, 0L) == 1L | coalesce(peaks_fail, 0L) == 1L ~ "Remove",
-      coalesce(FRiP_fail, 0L) == 1L | coalesce(chrM_perc_fail, 0L) == 1L | coalesce(dup_perc_fail, 0L) == 1L ~ "Flag",
+    total_score         = rowSums(dplyr::across(c(mapped_reads_M_fail, peaks_fail, FRiP_fail, chrM_perc_fail, dup_perc_fail)), na.rm = TRUE),
+    remove_or_flag      = dplyr::case_when(
+      dplyr::coalesce(mapped_reads_M_fail, 0L) == 1L | dplyr::coalesce(peaks_fail, 0L) == 1L ~ "Remove",
+      dplyr::coalesce(FRiP_fail, 0L) == 1L | dplyr::coalesce(chrM_perc_fail, 0L) == 1L | dplyr::coalesce(dup_perc_fail, 0L) == 1L ~ "Flag",
       TRUE ~ "Pass"
     ),
     dup_perc = ifelse(!is.na(dup_frac), dup_frac * 100, NA_real_)
@@ -293,14 +302,14 @@ merged <- merged %>%
 # ---------- 8) Fill Sample_ID / Donor_number from fastq_1 if blank -----------
 merged <- ensure_chr(merged, c("fastq_1","fastq_2","Sample_ID","Donor_number"))
 merged <- merged %>%
-  mutate(
-    Sample_ID    = coalesce(na_if(Sample_ID, ""),    extract_sample_id(fastq_1)),
-    Donor_number = coalesce(na_if(Donor_number, ""), extract_donor(fastq_1))
+  dplyr::mutate(
+    Sample_ID    = dplyr::coalesce(na_if(Sample_ID, ""),    extract_sample_id(fastq_1)),
+    Donor_number = dplyr::coalesce(na_if(Donor_number, ""), extract_donor(fastq_1))
   )
 
 # ---------- 9) Friendly rounding ----------------------------------------------
 merged <- merged %>%
-  mutate(
+  dplyr::mutate(
     unique_reads_M      = round(unique_reads_M, 2),
     mapping_perc        = round(mapping_perc, 2),
     duplicated_reads_M  = round(duplicated_reads_M, 2),
@@ -330,7 +339,7 @@ for (c in final_cols) if (!(c %in% names(merged))) merged[[c]] <- NA
 
 # Keep visible columns exactly as-is; just select/relabel into final layout
 out <- merged %>%
-  transmute(
+  dplyr::transmute(
     fastq_1                = .data$fastq_1,
     Sample_ID              = .data$Sample_ID,
     Donor_number           = .data$Donor_number,
@@ -369,6 +378,6 @@ out <- merged %>%
 out$sample_join <- NULL
 
 # ---------- 11) Write ---------------------------------------------------------
-write_csv(out, out_csv, na = "")
+readr::write_csv(out, out_csv, na = "")
 cat0("✅ Wrote: ", out_csv, " (rows: ", nrow(out), ")")
 cat0("📁 Output date folder: ", env$output_wd)
