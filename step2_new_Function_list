@@ -92,6 +92,7 @@ homer_annot <- .first_existing(
 
 # Prefer merged colData you created in output_wd; fall back to training
 coldata_file <- .first_existing(
+  file.path(output_wd, "deseq_input_merged_samples_PARSED.csv"),
   file.path(output_wd, "deseq_input_merged_samples.csv"),
   file.path(output_wd, "coldata_for_DESeq2.csv"),
   file.path(training_dir, "deseq_input_merged_samples.csv"),
