@@ -571,7 +571,3 @@ function_for_upset_plot_by_compA <- function(comp_a_group, deseq_df = deseq_opti
   )
   return(summary_df)
 }
-
-# =============================================================================
-#                               End of Script
-# =============================================================================
