@@ -193,3 +193,4 @@ message(
   " | conditions (core): ", length(unique(coldata_out$condition_core)),
   " | RBC statuses: ", paste(names(table(coldata_out$rbc)), table(coldata_out$rbc), collapse="; ")
 )
+
